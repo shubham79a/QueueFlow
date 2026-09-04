@@ -1,0 +1,13 @@
+node_modules/
+dist/
+
+# Local secrets / machine-specific config. .env.example is committed instead.
+.env
+
+# Personal planning notes, not part of the project.
+docs-no-commit/
+
+*.log
+
+# scratch file for a commit message; delete after use
+.commitmsg

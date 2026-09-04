@@ -1,0 +1,27 @@
+services:
+  redis:
+    image: redis:7.2-alpine
+    container_name: queueflow-redis
+    ports:
+      - "6379:6379"
+
+    # Persistence is OFF on purpose.
+    #
+    # Redis here is a queue, not a database. Leaving the default RDB snapshots on
+    # would give it a half-durability that is worse than either extreme: you would
+    # sometimes recover a queue after a restart and sometimes lose the last few
+    # seconds of it, with no way to tell which happened.
+    #
+    # Turning it off makes the trade-off explicit and asks the right question early:
+    # if Redis holds the queue and Redis is volatile, where does the permanent
+    # record of a job live? That question is Phase 2.
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+# No named volume, for the same reason: `docker compose down` should leave nothing
+# behind, so every run starts from a known-empty queue.

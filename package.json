@@ -1,0 +1,30 @@
+{
+  "name": "queueflow",
+  "version": "0.1.0",
+  "private": true,
+  "description": "A distributed background job queue built on raw Redis primitives",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "dev:api": "tsx watch --env-file=.env src/api/index.ts",
+    "dev:worker": "tsx watch --env-file=.env src/worker/index.ts",
+    "typecheck": "tsc --noEmit",
+    "redis:up": "docker compose up -d",
+    "redis:down": "docker compose down",
+    "redis:cli": "docker compose exec redis redis-cli",
+    "redis:monitor": "docker compose exec redis redis-cli monitor"
+  },
+  "dependencies": {
+    "express": "^5.1.0",
+    "ioredis": "^5.4.2"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.0",
+    "@types/node": "^22.10.2",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  }
+}
