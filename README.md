@@ -11,7 +11,7 @@ Redis carries job ids between them; Postgres holds the payloads, outcomes and ti
 
 ## Architecture
 
-```
+```text
    client ──POST /jobs──▶  Express API ──INSERT──▶ ┌────────────┐
                             (:4000)                │  Postgres  │  jobs, job_effects
                                  │                 └────────────┘
@@ -84,14 +84,31 @@ curl -X POST http://localhost:4000/jobs \
 
 | Type | Payload | Behaviour |
 | --- | --- | --- |
-| `sleep` | `{ ms: number }` | Waits, then succeeds |
-| `always_fail` | `{ message?: string }` | Throws. A test fixture for the failure path |
+| `sleep` | `{ ms: number }` | Waits, then succeeds. A controlled variable for reliability testing |
+| `always_fail` | `{ message?: string }` | Throws. A fixture for the failure path |
+| `deliver_webhook` | `{ url, body?, timeoutMs? }` | POSTs JSON to `url`. Fails on non-2xx, connection refusal, or timeout |
+
+### Testing webhook delivery
+
+`npm run dev:receiver` starts a stand-in receiver on port 4001 that can be made to fail on demand:
+
+| Route | Behaviour |
+| --- | --- |
+| `POST /hook` | Always succeeds |
+| `POST /hook/down` | Always returns 500 |
+| `POST /hook/slow` | Holds the connection open for 60s |
+| `POST /hook/flaky/:n` | Fails the first `n` deliveries of each job, then succeeds |
+| `GET /deliveries` | What actually arrived, counted per job |
+
+Each delivery carries `X-QueueFlow-Job-Id` and `X-QueueFlow-Attempt`, the way GitHub sends
+`X-GitHub-Delivery`. `GET /deliveries` is deliberately an account of events from outside the
+queue — when it disagrees with `job_effects`, the disagreement is the bug.
 
 ---
 
 ## Job lifecycle
 
-```
+```text
   queued ──▶ running ──┬──▶ succeeded
                        └──▶ failed
 ```
@@ -131,7 +148,7 @@ Open a psql shell with `npm run db:psql`.
 `npm run redis:monitor` streams every command the server receives, which is the clearest way to see
 the handoff actually happen:
 
-```
+```text
 "LPUSH"  "queueflow:pending" "26c98da8-..."
 "BRPOP"  "queueflow:pending" "0"
 ```
@@ -161,7 +178,7 @@ idempotency keys · a live dashboard · containerised deployment with CI.
 
 ## Layout
 
-```
+```text
 db/schema.sql        tables, constraints, indexes
 gaps/                known limitations, per milestone
 src/
@@ -176,6 +193,7 @@ src/
   worker/
     index.ts         consumer loop and lifecycle transitions
     handlers.ts      job type implementations
+  receiver/index.ts  test webhook receiver, for local development only
 ```
 
 ## Scripts
@@ -186,5 +204,6 @@ src/
 | `npm run db:migrate` | Apply the schema |
 | `npm run db:psql` | psql shell |
 | `npm run dev:api` / `dev:worker` | Run with watch-reload |
+| `npm run dev:receiver` | Local webhook receiver on :4001 for testing deliveries |
 | `npm run redis:cli` / `redis:monitor` | Inspect Redis |
 | `npm run typecheck` | `tsc --noEmit` |

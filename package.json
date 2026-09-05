@@ -11,6 +11,7 @@
   "scripts": {
     "dev:api": "tsx watch --env-file=.env src/api/index.ts",
     "dev:worker": "tsx watch --env-file=.env src/worker/index.ts",
+    "dev:receiver": "tsx watch --env-file=.env src/receiver/index.ts",
     "db:migrate": "tsx --env-file=.env src/db/migrate.ts",
     "db:psql": "docker compose exec postgres psql -U queueflow -d queueflow",
     "typecheck": "tsc --noEmit",

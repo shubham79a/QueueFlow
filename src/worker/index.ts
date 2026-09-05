@@ -65,12 +65,24 @@ async function processOne(jobId: string): Promise<void> {
    * that is attempted and dies mid-flight has still been attempted, and Phase 4's
    * retry cap has to count it or a poisonous job retries forever.
    */
-  await query(
+  const claimed = await query<{ attempts: number }>(
     db,
     `UPDATE jobs SET status = 'running', started_at = now(), attempts = attempts + 1
-      WHERE id = $1`,
+      WHERE id = $1
+      RETURNING attempts`,
     [job.id],
   );
+
+  /**
+   * Take the new count from RETURNING rather than adding one in JavaScript.
+   *
+   * The row was SELECTed before this UPDATE, so the in-memory copy is already a
+   * version behind — a handler reading job.attempts would report the attempt it
+   * was on last time. RETURNING hands back the value the database actually
+   * committed, which is what the webhook's X-QueueFlow-Attempt header reports and
+   * what Phase 4's backoff delay will be computed from.
+   */
+  job.attempts = claimed[0]?.attempts ?? job.attempts + 1;
 
   try {
     await handlers[job.type](job, log);

@@ -3,7 +3,7 @@
  */
 
 /** Job types this system knows how to run. */
-export const JOB_TYPES = ["sleep", "always_fail"] as const;
+export const JOB_TYPES = ["sleep", "always_fail", "deliver_webhook"] as const;
 
 export type JobType = (typeof JOB_TYPES)[number];
 
@@ -12,6 +12,8 @@ export interface JobPayloads {
   sleep: { ms: number };
   /** A test fixture: throws so the failed path and last_error are reachable. */
   always_fail: { message?: string };
+  /** POST `body` as JSON to `url`. Fails on timeout, refusal, or any non-2xx. */
+  deliver_webhook: { url: string; body?: unknown; timeoutMs?: number };
 }
 
 /** The lifecycle. Mirrors the CHECK constraint in db/schema.sql — keep them in step. */
@@ -107,6 +109,29 @@ export function validatePayload(type: JobType, payload: unknown): string | null 
     const ms = (payload as Record<string, unknown>).ms;
     if (typeof ms !== "number" || !Number.isFinite(ms) || ms < 0) {
       return "sleep requires payload.ms (a non-negative number)";
+    }
+  }
+
+  if (type === "deliver_webhook") {
+    const p = payload as Record<string, unknown>;
+    if (typeof p.url !== "string") return "deliver_webhook requires payload.url";
+
+    // Parsed here, at the edge, rather than left for fetch() to throw on inside
+    // the worker. A malformed URL is a bad request — the caller can fix it and
+    // should be told immediately — not a job that gets accepted, queued, run and
+    // then marked failed several seconds later.
+    let parsed: URL;
+    try {
+      parsed = new URL(p.url);
+    } catch {
+      return "deliver_webhook payload.url is not a valid URL";
+    }
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+      return "deliver_webhook payload.url must be http or https";
+    }
+
+    if (p.timeoutMs !== undefined && (typeof p.timeoutMs !== "number" || p.timeoutMs <= 0)) {
+      return "deliver_webhook payload.timeoutMs must be a positive number";
     }
   }
 
