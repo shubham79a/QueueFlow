@@ -2,10 +2,31 @@ import { KEYS } from "../shared/keys.js";
 import { createLogger } from "../shared/log.js";
 import { createRedis } from "../shared/redis.js";
 import { createDb, query } from "../shared/db.js";
+import { Semaphore } from "../shared/semaphore.js";
 import { isUuid, rowToJob, type JobRow } from "../shared/types.js";
 import { handlers } from "./handlers.js";
 
 const WORKER_ID = process.env.WORKER_ID ?? "w1";
+
+/**
+ * How many jobs this ONE process may have in flight at once.
+ *
+ * This is a different dial from "how many worker processes are running", and the
+ * difference is not cosmetic:
+ *
+ *   CONCURRENCY   helps only for IO-BOUND work. `sleep` is a timer and
+ *                 `deliver_webhook` is a socket wait — during both, the event
+ *                 loop is idle and can service other jobs. One process genuinely
+ *                 runs many at once.
+ *
+ *   MORE WORKERS  is what CPU-BOUND work needs. Resizing an image or hashing a
+ *                 password occupies the event loop, so a second job in the same
+ *                 process waits for the first regardless of this setting. Only
+ *                 another process (another core) helps.
+ *
+ * Default 1, so behaviour is unchanged unless asked for.
+ */
+const CONCURRENCY = Math.max(1, Number(process.env.CONCURRENCY ?? 1));
 
 const log = createLogger(WORKER_ID);
 
@@ -148,10 +169,44 @@ async function processOne(jobId: string): Promise<void> {
   }
 }
 
+/**
+ * The capacity limit, and the reason the loop below is shaped the way it is.
+ *
+ * NOTHING IN HERE IS A LOCK, and none is needed.
+ *
+ * Three workers all block on the same list. Redis executes commands one at a
+ * time — it is single-threaded — so three simultaneous BRPOPs are serialised by
+ * the server, and an element is handed to exactly one of them. Two workers
+ * cannot receive the same job id.
+ *
+ * That is mutual exclusion obtained from the data store rather than built on top
+ * of it. Adding a lock here would be pure ceremony: it would guard a race that
+ * the server has already made impossible, while adding a way to deadlock.
+ */
+const slots = new Semaphore(CONCURRENCY);
+
 async function main(): Promise<void> {
-  log.info(null, `worker ${WORKER_ID} up, waiting on ${KEYS.pending}`);
+  log.info(null, `worker ${WORKER_ID} up, concurrency ${CONCURRENCY}, waiting on ${KEYS.pending}`);
 
   while (true) {
+    /**
+     * ACQUIRE A SLOT BEFORE POPPING. This ordering is the substance of the phase.
+     *
+     * The tempting alternative is to pop eagerly and buffer the jobs in memory.
+     * That is wrong, and not subtly:
+     *
+     *   - The queue would move INTO this process. `llen queueflow:pending` would
+     *     report empty while twenty jobs sat in a local array.
+     *   - A crash would strand twenty jobs instead of one.
+     *   - Those buffered jobs would be invisible to every other worker, so an
+     *     idle worker could sit doing nothing beside a backlog.
+     *
+     * Waiting for a slot first means a job leaves Redis only when something is
+     * ready to run it immediately. Work this process cannot start stays in Redis,
+     * visible and available to anyone. That is backpressure: consumer capacity,
+     * not producer rate, decides when work is taken.
+     */
+    await slots.acquire();
     /**
      * BRPOP — Blocking Right POP — rather than polling with LPOP in a loop.
      *
@@ -181,7 +236,10 @@ async function main(): Promise<void> {
      */
     const result = await blocking.brpop(KEYS.pending, 0);
 
-    if (!result) continue; // only on timeout, which cannot happen with 0.
+    if (!result) {
+      slots.release(); // nothing taken, so give the slot straight back
+      continue; // only on timeout, which cannot happen with 0.
+    }
 
     const [, jobId] = result;
 
@@ -190,18 +248,29 @@ async function main(): Promise<void> {
     // the bad value came from.
     if (!isUuid(jobId)) {
       log.error(null, `discarded non-uuid queue entry: ${jobId.slice(0, 80)}`);
+      slots.release();
       continue;
     }
 
     /**
-     * Awaited, not fired-and-forgotten. This worker runs exactly one job at a time:
-     * the loop cannot come back around to BRPOP until processOne resolves.
+     * NOT awaited — and that is the change that lifts the ceiling.
      *
-     * That is a real ceiling — a 5-second job means at most 12 jobs a minute out of
-     * this process no matter how many are waiting — and it is intentional. Making
-     * it faster is Phase 3.
+     * Previously this line was `await processOne(jobId)`, so the loop could not
+     * reach BRPOP again until the handler finished. One job at a time, always:
+     * five 8-second jobs took 40 seconds on an idle machine.
+     *
+     * Now the await is on the SLOT, not on the job. The loop comes straight back
+     * around and blocks on the next BRPOP while this job runs, so up to
+     * CONCURRENCY jobs are in flight and the limit is capacity rather than
+     * sequence.
+     *
+     * `void` marks the floating promise as deliberate. `.finally` returns the slot
+     * on success AND on failure — processOne already swallows handler errors, but
+     * if it ever threw for another reason, a slot leaked here would shrink this
+     * worker's capacity permanently and silently until it stopped taking work
+     * altogether.
      */
-    await processOne(jobId);
+    void processOne(jobId).finally(() => slots.release());
   }
 }
 

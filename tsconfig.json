@@ -1,4 +1,12 @@
 {
+  // The CHECKING config: covers every TypeScript file in the repo, emits nothing.
+  //
+  // This is also the one the editor picks up, which is the point. An earlier
+  // version included only "src/**/*.ts", so `tsc --noEmit` reported success while
+  // silently ignoring test/ and vitest.config.ts — the editor found real errors
+  // the command line said did not exist.
+  //
+  // Building is a separate concern with a separate file: tsconfig.build.json.
   "compilerOptions": {
     "target": "ES2023",
     "lib": ["ES2023"],
@@ -6,8 +14,7 @@
     "moduleResolution": "NodeNext",
     "types": ["node"],
 
-    "rootDir": "src",
-    "outDir": "dist",
+    "noEmit": true,
 
     "strict": true,
     "verbatimModuleSyntax": true,
@@ -15,5 +22,5 @@
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true
   },
-  "include": ["src/**/*.ts"]
+  "include": ["src/**/*.ts", "test/**/*.ts", "*.config.ts"]
 }

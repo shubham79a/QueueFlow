@@ -1,0 +1,14 @@
+{
+  // The BUILD config: compiles the shipping code to dist/, and nothing else.
+  //
+  // test/ and the dev tooling are excluded deliberately — a production image has
+  // no business carrying the throughput benchmark or the vitest helpers.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "rootDir": "src",
+    "outDir": "dist"
+  },
+  "include": ["src/**/*.ts"],
+  "exclude": ["src/dev/**"]
+}

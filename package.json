@@ -12,9 +12,13 @@
     "dev:api": "tsx watch --env-file=.env src/api/index.ts",
     "dev:worker": "tsx watch --env-file=.env src/worker/index.ts",
     "dev:receiver": "tsx watch --env-file=.env src/receiver/index.ts",
+    "dev:workers": "tsx --env-file=.env src/dev/workers.ts",
+    "test": "vitest run",
+    "bench": "tsx --env-file=.env src/dev/bench.ts",
     "db:migrate": "tsx --env-file=.env src/db/migrate.ts",
     "db:psql": "docker compose exec postgres psql -U queueflow -d queueflow",
     "typecheck": "tsc --noEmit",
+    "build": "tsc -p tsconfig.build.json",
     "up": "docker compose up -d",
     "down": "docker compose down",
     "redis:cli": "docker compose exec redis redis-cli",
@@ -30,6 +34,7 @@
     "@types/node": "^22.10.2",
     "@types/pg": "^8.23.1",
     "tsx": "^4.19.2",
-    "typescript": "^5.7.2"
+    "typescript": "^5.7.2",
+    "vitest": "^5.0.0"
   }
 }

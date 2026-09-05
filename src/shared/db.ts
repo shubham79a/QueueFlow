@@ -19,10 +19,22 @@ const DATABASE_URL =
 export function createDb(name: string, log: Logger): Pool {
   const pool = new Pool({
     connectionString: DATABASE_URL,
-    // Small on purpose. Each worker process needs a couple of connections at
-    // most, and Postgres charges real memory per backend — the default of 10 per
-    // process stops being free once Phase 3 runs ten workers.
-    max: 5,
+
+    /**
+     * Sized from concurrency, not fixed.
+     *
+     * Every job in flight needs a connection to itself while it commits — the
+     * transaction in the worker checks one out with db.connect() and holds it
+     * until COMMIT. So a worker running N jobs concurrently can need N
+     * connections at the same instant, plus a spare for the SELECT and the claim.
+     *
+     * Hardcoding this too low does not error, which is what makes it nasty: jobs
+     * simply queue up inside the pool waiting for a connection, throughput
+     * flatlines, and nothing in any log says why. Too high is not free either —
+     * Postgres runs a separate backend process per connection, so ten workers
+     * with a generous pool each will exhaust max_connections on the server.
+     */
+    max: Math.max(4, Number(process.env.CONCURRENCY ?? 1) + 2),
     idleTimeoutMillis: 30_000,
     connectionTimeoutMillis: 5_000,
   });

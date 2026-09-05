@@ -106,6 +106,54 @@ queue — when it disagrees with `job_effects`, the disagreement is the bug.
 
 ---
 
+## Concurrency
+
+Two independent dials, for two different bottlenecks:
+
+| Dial | What it is | When it helps |
+| --- | --- | --- |
+| **Worker processes** | `npm run dev:workers 3` | CPU-bound work — a second process is a second core |
+| **`CONCURRENCY`** | jobs in flight per process | IO-bound work — the event loop is idle during a timer or socket wait |
+
+`sleep` and `deliver_webhook` are both IO-bound, so `CONCURRENCY` does most of the work here. A
+handler that hashed passwords would occupy the event loop and gain nothing from it.
+
+**No lock is used, and none is needed.** Redis executes commands one at a time, so simultaneous
+`BRPOP`s from several workers are serialised by the server and each element goes to exactly one
+caller. Mutual exclusion comes from the data store rather than being built on top of it.
+
+**A slot is acquired before the pop, not after.** A job leaves Redis only when a worker is ready to
+run it immediately, so work that cannot start stays in Redis — visible to `llen`, claimable by any
+other worker, and not lost if this process dies. That is backpressure: consumer capacity, rather
+than producer rate, decides when work is taken.
+
+### Measured throughput
+
+`npm run bench` sweeps the matrix. With 1ms jobs, so per-job overhead dominates rather than the
+sleep itself:
+
+```text
+workers  conc   slots   jobs/s
+      1     1       1      65.8
+      1     5       5     486.7
+      3     5      15     922.6
+      3    20      60    1039.7      4× the slots, +13% throughput
+```
+
+Throughput plateaus near **1,000 jobs/s**, and measuring the dependencies says why:
+
+| Dependency | Measured | Ops per job | Implied ceiling |
+| --- | --- | --- | --- |
+| Redis `LPUSH` + `RPOP` | 8,701/s | 2 | ~4,350 jobs/s |
+| Postgres reads | 11,612/s | 1 | ~11,600 jobs/s |
+| **Postgres writes** | **3,591/s** | **3** | **~1,197 jobs/s** |
+
+The bottleneck is Postgres commit throughput — three durable writes per job (claim, effect row,
+terminal status). Adding workers past that point produces more in-flight jobs and longer queue
+waits, not more completed work.
+
+---
+
 ## Job lifecycle
 
 ```text
@@ -165,7 +213,10 @@ demonstrates it. In summary:
 - **No retry, backoff or dead-letter handling.** A failure is terminal.
 - **A crash between the insert and the enqueue leaves an unrunnable `queued` row.** Findable by
   query; no automatic sweeper yet.
-- **One job in flight per worker**, and no concurrency controls.
+- **A killed worker now strands up to `CONCURRENCY` jobs**, not one — concurrency multiplies the
+  blast radius of the gap above.
+- **No ordering guarantee** once concurrency is above 1; jobs start FIFO but finish in any order.
+- **No rate limiting toward downstream services**, and one shared slot pool for all job types.
 - **No graceful shutdown** — `SIGTERM` kills in-flight work.
 
 ## Roadmap
@@ -190,10 +241,15 @@ src/
     log.ts           traceable per-job log format
   db/migrate.ts      applies db/schema.sql
   api/index.ts       HTTP producer
+    semaphore.ts     counting semaphore bounding in-flight jobs per worker
   worker/
     index.ts         consumer loop and lifecycle transitions
     handlers.ts      job type implementations
   receiver/index.ts  test webhook receiver, for local development only
+  dev/
+    workers.ts       spawn N workers in one terminal
+    bench.ts         throughput sweep
+test/                integration tests against real Redis and Postgres
 ```
 
 ## Scripts
@@ -204,6 +260,9 @@ src/
 | `npm run db:migrate` | Apply the schema |
 | `npm run db:psql` | psql shell |
 | `npm run dev:api` / `dev:worker` | Run with watch-reload |
+| `npm run dev:workers 3` | Run N workers in one terminal, output prefixed per worker |
 | `npm run dev:receiver` | Local webhook receiver on :4001 for testing deliveries |
+| `npm test` | Concurrency proof — 3 workers, 100 jobs, zero duplicates |
+| `npm run bench` | Throughput sweep across workers × concurrency |
 | `npm run redis:cli` / `redis:monitor` | Inspect Redis |
 | `npm run typecheck` | `tsc --noEmit` |
