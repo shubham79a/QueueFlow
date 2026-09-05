@@ -11,19 +11,23 @@
   "scripts": {
     "dev:api": "tsx watch --env-file=.env src/api/index.ts",
     "dev:worker": "tsx watch --env-file=.env src/worker/index.ts",
+    "db:migrate": "tsx --env-file=.env src/db/migrate.ts",
+    "db:psql": "docker compose exec postgres psql -U queueflow -d queueflow",
     "typecheck": "tsc --noEmit",
-    "redis:up": "docker compose up -d",
-    "redis:down": "docker compose down",
+    "up": "docker compose up -d",
+    "down": "docker compose down",
     "redis:cli": "docker compose exec redis redis-cli",
     "redis:monitor": "docker compose exec redis redis-cli monitor"
   },
   "dependencies": {
     "express": "^5.1.0",
-    "ioredis": "^5.4.2"
+    "ioredis": "^5.4.2",
+    "pg": "^8.23.0"
   },
   "devDependencies": {
     "@types/express": "^5.0.0",
     "@types/node": "^22.10.2",
+    "@types/pg": "^8.23.1",
     "tsx": "^4.19.2",
     "typescript": "^5.7.2"
   }

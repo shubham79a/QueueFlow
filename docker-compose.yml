@@ -7,14 +7,13 @@ services:
 
     # Persistence is OFF on purpose.
     #
-    # Redis here is a queue, not a database. Leaving the default RDB snapshots on
-    # would give it a half-durability that is worse than either extreme: you would
-    # sometimes recover a queue after a restart and sometimes lose the last few
-    # seconds of it, with no way to tell which happened.
+    # Redis here is a transport, not a store of record. Leaving the default RDB
+    # snapshots on would give it a half-durability that is worse than either
+    # extreme: you would sometimes recover a queue after a restart and sometimes
+    # lose the last few seconds of it, with no way to tell which happened.
     #
-    # Turning it off makes the trade-off explicit and asks the right question early:
-    # if Redis holds the queue and Redis is volatile, where does the permanent
-    # record of a job live? That question is Phase 2.
+    # Postgres is the durable side of this system. Redis is allowed to be volatile
+    # precisely because nothing is only in Redis.
     command: ["redis-server", "--save", "", "--appendonly", "no"]
 
     healthcheck:
@@ -23,5 +22,28 @@ services:
       timeout: 3s
       retries: 5
 
-# No named volume, for the same reason: `docker compose down` should leave nothing
-# behind, so every run starts from a known-empty queue.
+  postgres:
+    image: postgres:16-alpine
+    container_name: queueflow-postgres
+    environment:
+      POSTGRES_USER: queueflow
+      POSTGRES_PASSWORD: queueflow
+      POSTGRES_DB: queueflow
+    # Host 5433, not 5432: this machine already runs a Postgres on the default
+    # port. Inside the compose network the port is still 5432.
+    ports:
+      - "5433:5432"
+
+    # Unlike Redis, this one gets a volume. It is the record of what happened,
+    # and it is supposed to survive `docker compose down`.
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U queueflow -d queueflow"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+volumes:
+  pgdata:

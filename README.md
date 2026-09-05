@@ -1,61 +1,63 @@
 # QueueFlow
 
-A distributed background job queue, built on raw Redis primitives — no BullMQ, no
-Bee-Queue, no Agenda. The retry scheduler, backoff policy, dead-letter queue,
-heartbeat protocol, orphan reaper and idempotency layer are the project; a queue
-library would be a wrapper around someone else's answers to all of them.
+A distributed background job queue built directly on Redis primitives — no BullMQ, Bee-Queue or
+Agenda. The handoff protocol, lifecycle tracking, failure recording and recovery machinery are
+implemented here rather than delegated, so the policy decisions stay explicit and reviewable.
 
-> **Status: Phase 1 of 7.** A producer, a queue, and one consumer. No persistence,
-> no retries, no reliability machinery — those are Phases 2, 4 and 5, and each one
-> exists to fix a failure this phase can demonstrate.
+An HTTP API accepts work and returns immediately. Separate worker processes consume and execute it.
+Redis carries job ids between them; Postgres holds the payloads, outcomes and timings.
 
 ---
 
-## Phase 1 architecture
+## Architecture
 
 ```
-  curl ──POST /jobs──▶  Express API  ──LPUSH──▶  ┌──────────────────┐
-                        (port 4000)              │ queueflow:pending│  Redis LIST
-                                                 └──────────────────┘
-                                                          │
-                                                        BRPOP  (blocks)
-                                                          │
-                                                          ▼
-                                                    Worker process
-                                                    runs the handler
+   client ──POST /jobs──▶  Express API ──INSERT──▶ ┌────────────┐
+                            (:4000)                │  Postgres  │  jobs, job_effects
+                                 │                 └────────────┘
+                                 │ LPUSH id             ▲   ▲
+                                 ▼                      │   │
+                        ┌──────────────────┐            │   │
+                        │ queueflow:pending│  Redis LIST│   │
+                        └──────────────────┘            │   │
+                                 │                      │   │
+                              BRPOP (blocks)            │   │
+                                 ▼                      │   │
+                            worker process ─────────────┘   │
+                            runs the handler ────────────────┘
 ```
 
-Two OS processes. They never import each other and share no memory — the only
-thing connecting them is a Redis list and an agreement on its name.
+**Why both stores.** Redis is fast and volatile, and is used only as a transport — it holds job ids
+and nothing else. Postgres is the permanent record: it answers "what happened to job X", "what is
+still queued", and "how long do jobs wait before they start". Redis alone cannot answer any question
+about a job it has already handed out.
 
-`LPUSH` writes to the head, `BRPOP` reads from the tail. Opposite ends is what
-makes the list FIFO rather than a stack.
+**Write ordering.** The two stores cannot be written atomically — no transaction spans them. The row
+is inserted *before* the id is pushed, so a crash between the two leaves a `queued` row that a query
+can find, rather than a worker holding an id for a job that was never recorded. An orphan you can
+find beats a ghost you cannot.
 
 ---
 
 ## Running it
 
-**Prerequisites:** Node ≥ 22, Docker Desktop running.
+Requires Node ≥ 22 and Docker.
 
 ```bash
 npm install
-cp .env.example .env      # optional — every value has a default in code
-npm run redis:up          # docker compose up -d
+cp .env.example .env      # optional; every value has a default in code
+npm run up                # redis + postgres
+npm run db:migrate        # applies db/schema.sql
 ```
 
-Then three terminals:
+Then, in separate terminals:
 
-| Terminal | Command |
-| --- | --- |
-| A | `npm run dev:api` |
-| B | `npm run dev:worker` |
-| C | `npm run redis:monitor` |
+```bash
+npm run dev:api
+npm run dev:worker
+```
 
-Terminal C is the one worth having. `redis-cli MONITOR` prints every command the
-server receives, so you watch the job move rather than infer it from logs.
-
-**Enqueue a job** (Git Bash / WSL — in PowerShell use `curl.exe`, since `curl`
-there is an alias for `Invoke-WebRequest`):
+### Submitting work
 
 ```bash
 curl -X POST http://localhost:4000/jobs \
@@ -64,116 +66,125 @@ curl -X POST http://localhost:4000/jobs \
 ```
 
 ```json
-{ "jobId": "a1b2c3d4-...", "status": "queued" }
+{ "jobId": "26c98da8-4a12-45f1-8596-05f41448a898", "status": "queued" }
 ```
 
-**202 Accepted, not 200 OK.** 200 means "here is the result of what you asked for",
-and there is no result — the work has not started. 202 means "I have taken
-responsibility for this and I am not done", which is exactly true.
+`202 Accepted`, not `200 OK` — the work has not been done, and the API never observes its outcome.
 
----
+### API
 
-## Inspecting Redis by hand
-
-```bash
-npm run redis:cli llen queueflow:pending          # queue depth
-npm run redis:cli lrange queueflow:pending 0 -1   # everything waiting
-npm run redis:cli ping
-```
-
----
-
-## Phase 1 acceptance checks
-
-1. **Round trip.** Enqueue one job → API returns `202` → terminal C shows `LPUSH`
-   then the worker's `BRPOP` → terminal B logs `started` … 5s … `finished`.
-2. **Drain.** Enqueue 5 jobs, wait ~25s, then `llen queueflow:pending` → `0`.
-   They run one at a time, in order — that ceiling is what Phase 3 removes.
-3. **The queue holds state, not the worker.** Stop the worker. Enqueue 3 jobs; the
-   API still returns 202 and `llen` climbs to 3. Start the worker — it drains all
-   three. The producer never needed a consumer to exist.
-4. **Health reflects the dependency.** `curl http://localhost:4000/health` → 200.
-   `npm run redis:down`, call it again → 503.
-
----
-
-## Now break it — this is the actual deliverable
-
-Phase 1 is built the naive way on purpose. Do this before moving on:
-
-```bash
-# 1. Enqueue a 20-second job
-curl -X POST http://localhost:4000/jobs -H 'Content-Type: application/json' \
-     -d '{"type":"sleep","payload":{"ms":20000}}'
-
-# 2. Confirm the worker has picked it up (terminal B logs "started")
-
-# 3. Kill the worker — Ctrl+C in terminal B, or from another shell:
-#    taskkill /F /PID <pid>     (Windows)
-
-# 4. Ask Redis where the job went:
-npm run redis:cli llen queueflow:pending      # -> 0
-npm run redis:cli keys '*'                    # -> (empty array)
-```
-
-**The job is gone.** Not failed — gone. `BRPOP` removed it from Redis the instant
-the worker took it, so the only copy lived in that dead process's memory. There is
-no row, no log entry, no key, and no way for anyone to discover that a job was
-accepted and never ran. The API already told the client `202`.
-
-Two distinct problems, and they are what the next phases are for:
-
-| What's missing | Phase |
+| Endpoint | Purpose |
 | --- | --- |
-| No record the job ever existed → nowhere to look | 2 — Postgres |
-| Redis forgot it the moment it was handed out | 5 — `BLMOVE` + reaper |
+| `POST /jobs` | Submit work. Returns `202` with the job id |
+| `GET /jobs/:id` | Full record: status, attempts, error, timings |
+| `GET /jobs?status=&limit=` | Recent jobs, newest first |
+| `GET /health` | Redis and Postgres reachability, queue depth, status tally |
 
-Restarting the worker does not help. That is the point.
+### Job types
+
+| Type | Payload | Behaviour |
+| --- | --- | --- |
+| `sleep` | `{ ms: number }` | Waits, then succeeds |
+| `always_fail` | `{ message?: string }` | Throws. A test fixture for the failure path |
 
 ---
 
-## Deliberately not built yet
+## Job lifecycle
 
-Each of these removes a failure that motivates a later phase, so building it early
-costs more than it saves.
+```
+  queued ──▶ running ──┬──▶ succeeded
+                       └──▶ failed
+```
 
-- **No Postgres.** The job payload currently rides inside the Redis list entry.
-  `project.md`'s key layout ("Redis holds ids, Postgres holds data") is the Phase 2
-  shape; splitting them *is* Phase 2's work.
-- **No `GET /jobs/:id`.** You will want it immediately and you cannot build it — a
-  job inside a Redis list has no address. Feeling that is the point.
-- **No retries, backoff, delayed ZSET or DLQ** → Phase 4. A thrown handler logs and
-  the job dies.
-- **No `BLMOVE`, heartbeat, reaper or idempotency** → Phase 5.
-- **No graceful shutdown** → Phase 7. Ctrl+C during a job kills it mid-flight.
-- **No concurrency.** One job at a time per worker: the loop cannot return to
-  `BRPOP` until the handler resolves → Phase 3.
+Enforced by a `CHECK` constraint in [db/schema.sql](db/schema.sql), so an invalid status fails at
+the write rather than creating a state nothing queries for.
+
+Three timestamps are recorded because they answer different questions:
+
+```sql
+started_at   - created_at   -- queue wait: a property of this system
+completed_at - started_at   -- execution time: a property of the work
+```
+
+Conflating them is the standard benchmarking mistake.
+
+---
+
+## Verifying correctness
+
+`job_effects` records one row per execution. Nothing in the system reads it — it exists so that
+correctness is a query rather than an argument about log files. Both of these must return zero rows:
+
+```sql
+-- did any job run more than once?
+SELECT job_id, COUNT(*) FROM job_effects GROUP BY job_id HAVING COUNT(*) > 1;
+
+-- did any job claim success without running?
+SELECT id FROM jobs WHERE status = 'succeeded'
+  AND id NOT IN (SELECT job_id FROM job_effects);
+```
+
+Open a psql shell with `npm run db:psql`.
+
+### Watching Redis
+
+`npm run redis:monitor` streams every command the server receives, which is the clearest way to see
+the handoff actually happen:
+
+```
+"LPUSH"  "queueflow:pending" "26c98da8-..."
+"BRPOP"  "queueflow:pending" "0"
+```
+
+---
+
+## Current limitations
+
+Tracked per milestone in [gaps/](gaps/), each with the reason it was left and a query that
+demonstrates it. In summary:
+
+- **Delivery is not guaranteed across worker failure.** `BRPOP` removes the id at handoff, so a
+  worker killed mid-job loses the job. The row is left at `running` — visible, but not recovered.
+- **No retry, backoff or dead-letter handling.** A failure is terminal.
+- **A crash between the insert and the enqueue leaves an unrunnable `queued` row.** Findable by
+  query; no automatic sweeper yet.
+- **One job in flight per worker**, and no concurrency controls.
+- **No graceful shutdown** — `SIGTERM` kills in-flight work.
+
+## Roadmap
+
+Concurrency across multiple workers · retries with exponential backoff, jitter and a dead-letter
+queue · atomic pop-and-hold via `BLMOVE` with worker heartbeats, a stalled-job reaper and
+idempotency keys · a live dashboard · containerised deployment with CI.
 
 ---
 
 ## Layout
 
 ```
+db/schema.sql        tables, constraints, indexes
+gaps/                known limitations, per milestone
 src/
   shared/
-    keys.ts      Redis key names, defined once — a typo here is a silent bug
-    types.ts     Job shape + parseJob(), the runtime check at the trust boundary
-    log.ts       [w1] job_a1b2 ... — one job traceable across processes
-    redis.ts     connection factory (one connection per blocking call)
-  api/
-    index.ts     POST /jobs, GET /health
+    db.ts            Postgres pool + parameterised query helper
+    redis.ts         Redis connection factory
+    keys.ts          Redis key names, defined once
+    types.ts         job shape, lifecycle states, row mapping, validation
+    log.ts           traceable per-job log format
+  db/migrate.ts      applies db/schema.sql
+  api/index.ts       HTTP producer
   worker/
-    index.ts     the BRPOP loop
-    handlers.ts  job types — currently just `sleep`
+    index.ts         consumer loop and lifecycle transitions
+    handlers.ts      job type implementations
 ```
 
 ## Scripts
 
 | Script | Does |
 | --- | --- |
-| `npm run dev:api` | API with watch-reload |
-| `npm run dev:worker` | Worker with watch-reload |
+| `npm run up` / `down` | Start / remove Redis and Postgres |
+| `npm run db:migrate` | Apply the schema |
+| `npm run db:psql` | psql shell |
+| `npm run dev:api` / `dev:worker` | Run with watch-reload |
+| `npm run redis:cli` / `redis:monitor` | Inspect Redis |
 | `npm run typecheck` | `tsc --noEmit` |
-| `npm run redis:up` / `redis:down` | Start / remove the Redis container |
-| `npm run redis:cli` | `redis-cli` inside the container |
-| `npm run redis:monitor` | Live stream of every Redis command |
