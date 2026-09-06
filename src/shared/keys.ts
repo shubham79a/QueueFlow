@@ -13,4 +13,12 @@
 export const KEYS = {
   /** LIST — jobs waiting to be picked up. Producer LPUSHes, worker BRPOPs. */
   pending: "queueflow:pending",
+
+  /**
+   * ZSET — jobs waiting out a retry backoff, scored by the epoch-ms they become
+   * due. A sorted set rather than a list because the question being asked is
+   * "which of these are due now?", and ZRANGEBYSCORE answers it in log time
+   * without scanning. A list can only answer "what is at the end?".
+   */
+  delayed: "queueflow:delayed",
 } as const;

@@ -74,3 +74,37 @@ CREATE TABLE IF NOT EXISTS job_effects (
 );
 
 CREATE INDEX IF NOT EXISTS job_effects_job_id_idx ON job_effects (job_id);
+
+-- ---------------------------------------------------------------------------
+-- Retries.
+--
+-- Appended as idempotent ALTERs rather than edited into the CREATE TABLE above,
+-- because this file is executed whole on every `npm run db:migrate` and has to be
+-- safe against both a fresh database and one that already holds job history.
+-- ---------------------------------------------------------------------------
+
+-- When a retrying job becomes due. NULL for every other status.
+-- Duplicates the score held in the queueflow:delayed sorted set on purpose: Redis
+-- decides WHEN the job is promoted, this column is how a human asks WHY a job is
+-- sitting there and when it will move.
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS next_run_at TIMESTAMPTZ;
+
+-- 'retrying' is new: the job failed, has attempts left, and is parked in the
+-- delayed set waiting for its backoff to elapse.
+--
+-- It gets its own status rather than reusing 'queued' so that the two kinds of
+-- waiting stay distinguishable. A job in 'queued' is in Redis and will run as soon
+-- as a worker is free; a job in 'retrying' is in nobody's queue yet. Collapsing
+-- them would also break the orphan query in gaps/phase-2.md, which reports old
+-- 'queued' rows as jobs the API failed to enqueue.
+--
+-- 'failed' stays permitted but is no longer written. It is the slot for a
+-- permanent, non-retryable failure if error classification is ever added;
+-- 'dead' is what a job reaches after exhausting its attempts.
+ALTER TABLE jobs DROP CONSTRAINT IF EXISTS jobs_status_check;
+ALTER TABLE jobs ADD CONSTRAINT jobs_status_check
+  CHECK (status IN ('queued','running','retrying','succeeded','failed','dead'));
+
+-- Partial index: only retrying rows have a next_run_at worth looking up.
+CREATE INDEX IF NOT EXISTS jobs_next_run_at_idx ON jobs (next_run_at)
+  WHERE status = 'retrying';

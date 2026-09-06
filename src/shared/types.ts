@@ -17,7 +17,14 @@ export interface JobPayloads {
 }
 
 /** The lifecycle. Mirrors the CHECK constraint in db/schema.sql — keep them in step. */
-export const JOB_STATUSES = ["queued", "running", "succeeded", "failed", "dead"] as const;
+export const JOB_STATUSES = [
+  "queued",
+  "running",
+  "retrying",
+  "succeeded",
+  "failed",
+  "dead",
+] as const;
 
 export type JobStatus = (typeof JOB_STATUSES)[number];
 
@@ -40,6 +47,8 @@ export interface JobRecord<T extends JobType = JobType> {
   createdAt: Date;
   startedAt: Date | null;
   completedAt: Date | null;
+  /** When a 'retrying' job becomes due. NULL for every other status. */
+  nextRunAt: Date | null;
 }
 
 /** Exactly the column set every SELECT in this project uses. */
@@ -55,6 +64,7 @@ export interface JobRow {
   created_at: Date;
   started_at: Date | null;
   completed_at: Date | null;
+  next_run_at: Date | null;
 }
 
 /**
@@ -76,6 +86,7 @@ export function rowToJob(row: JobRow): JobRecord {
     createdAt: row.created_at,
     startedAt: row.started_at,
     completedAt: row.completed_at,
+    nextRunAt: row.next_run_at,
   };
 }
 
