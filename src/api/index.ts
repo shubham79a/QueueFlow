@@ -22,7 +22,8 @@ const app = express();
 app.use(express.json());
 
 const JOB_COLUMNS = `id, type, payload, status, attempts, max_attempts,
-                     last_error, idempotency_key, created_at, started_at, completed_at`;
+                     last_error, idempotency_key, created_at, started_at, completed_at,
+                     next_run_at`;
 
 /**
  * POST /jobs — the producer.
@@ -103,6 +104,61 @@ app.get("/jobs/:id", async (req, res) => {
   return res.json(rowToJob(row));
 });
 
+/**
+ * POST /jobs/:id/replay — the dead-letter queue's exit door.
+ *
+ * A DLQ is an inbox, not a graveyard. Jobs land there because something was wrong
+ * — a receiver was misconfigured, a payload was malformed, a downstream service
+ * was down for longer than the backoff allowed. Someone reads it, fixes the cause,
+ * and replays. Without this endpoint 'dead' would just mean 'discarded', and the
+ * DLQ would be a table nobody could act on.
+ *
+ * The attempt counter resets, because the retries that were exhausted were spent
+ * against the old, broken conditions. Keeping the count would mean a replayed job
+ * gets zero real attempts under the fixed ones.
+ */
+app.post("/jobs/:id/replay", async (req, res) => {
+  const { id } = req.params;
+
+  /**
+   * The status check is inside the UPDATE, not a separate SELECT-then-UPDATE.
+   *
+   * Two admins clicking replay at the same moment would both pass a prior SELECT,
+   * and both would push the id — the job would run twice. Making the condition
+   * part of the write means the second UPDATE matches zero rows, and Postgres's
+   * row locking settles it.
+   */
+  const rows = await query<JobRow>(
+    db,
+    `UPDATE jobs
+        SET status = 'queued', attempts = 0, last_error = NULL,
+            next_run_at = NULL, started_at = NULL, completed_at = NULL
+      WHERE id = $1 AND status = 'dead'
+      RETURNING ${JOB_COLUMNS}`,
+    [id],
+  );
+
+  const row = rows[0];
+  if (!row) {
+    // Either it does not exist, or it is not dead. Say which.
+    const existing = await query<{ status: string }>(
+      db,
+      `SELECT status FROM jobs WHERE id = $1`,
+      [id],
+    );
+    if (!existing[0]) return res.status(404).json({ error: "no such job" });
+    return res.status(409).json({
+      error: `only dead jobs can be replayed; this one is '${existing[0].status}'`,
+    });
+  }
+
+  // Row first, then enqueue — the same ordering as POST /jobs.
+  await redis.lpush(KEYS.pending, id);
+
+  log.info(id, "replayed from the dead-letter queue");
+  return res.status(202).json({ jobId: id, status: "queued" });
+});
+
 /** GET /jobs?status=&limit= — recent jobs, newest first. */
 app.get("/jobs", async (req, res) => {
   const status = req.query.status as JobStatus | undefined;
@@ -135,6 +191,9 @@ app.get("/health", async (_req, res) => {
   try {
     health.redis = await redis.ping();
     health.pending = await redis.llen(KEYS.pending);
+    // Jobs waiting out a backoff. Worth reporting separately from `pending`:
+    // a large delayed set means things are failing, not that things are busy.
+    health.delayed = await redis.zcard(KEYS.delayed);
   } catch (err) {
     health.status = "degraded";
     health.redis = err instanceof Error ? err.message : String(err);
