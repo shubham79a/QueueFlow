@@ -19,7 +19,42 @@ import type { JobType } from "../src/shared/types.js";
  * exactly this ability to spawn and SIGKILL a real process.
  */
 const here = dirname(fileURLToPath(import.meta.url));
-const workerEntry = resolve(here, "../src/worker/index.ts");
+const workerEntry    = resolve(here, "../src/worker/index.ts");
+const schedulerEntry = resolve(here, "../src/scheduler/index.ts");
+const receiverEntry  = resolve(here, "../src/receiver/index.ts");
+
+/**
+ * Every spawned process is a real one, started the same way. Retry tests need the
+ * scheduler (nothing promotes a delayed job without it) and the receiver (the
+ * flaky endpoint is what produces a transient failure on demand).
+ */
+function spawnProcess(entry: string, env: Record<string, string>) {
+  const output: string[] = [];
+  const child = spawn(
+    process.execPath,
+    ["--import", "tsx", "--env-file=.env", entry],
+    { env: { ...process.env, ...env }, stdio: ["ignore", "pipe", "pipe"] },
+  );
+  child.stdout?.on("data", (c: Buffer) => output.push(c.toString()));
+  child.stderr?.on("data", (c: Buffer) => output.push(c.toString()));
+  return { child, output };
+}
+
+/** Start the retry scheduler and wait until it is watching the delayed set. */
+export async function spawnScheduler(): Promise<SpawnedWorker> {
+  const { child, output } = spawnProcess(schedulerEntry, { SCHEDULER_ID: "s1" });
+  const w: SpawnedWorker = { id: "s1", child, output };
+  await waitFor(() => output.join("").includes("scheduler s1 up"), 30_000, "scheduler to start");
+  return w;
+}
+
+/** Start the webhook receiver and wait until it is listening. */
+export async function spawnReceiver(port = 4101): Promise<SpawnedWorker> {
+  const { child, output } = spawnProcess(receiverEntry, { RECEIVER_PORT: String(port) });
+  const w: SpawnedWorker = { id: "recv", child, output };
+  await waitFor(() => output.join("").includes("webhook receiver on"), 30_000, "receiver to start");
+  return w;
+}
 
 export const redis = new Redis(process.env.REDIS_URL ?? "redis://127.0.0.1:6379", {
   maxRetriesPerRequest: null,
@@ -34,7 +69,7 @@ export const db = new Pool({
 /** Wipe both stores so a rerun means something. */
 export async function reset(): Promise<void> {
   await db.query("TRUNCATE job_effects, jobs");
-  await redis.del(KEYS.pending);
+  await redis.del(KEYS.pending, KEYS.delayed);
 }
 
 export interface SpawnedWorker {

@@ -3,6 +3,7 @@ import { createLogger } from "../shared/log.js";
 import { createRedis } from "../shared/redis.js";
 import { createDb, query } from "../shared/db.js";
 import { Semaphore } from "../shared/semaphore.js";
+import { nextDelayMs } from "../shared/retry.js";
 import { isUuid, rowToJob, type JobRow } from "../shared/types.js";
 import { handlers } from "./handlers.js";
 
@@ -45,6 +46,20 @@ const log = createLogger(WORKER_ID);
 const blocking = createRedis(`${WORKER_ID}:blocking`, log);
 
 /**
+ * The second connection, and the reason createRedis has always been a factory.
+ *
+ * This is the constraint described above actually biting. When a handler fails,
+ * the worker must ZADD the job into the delayed set — but `blocking` is parked on
+ * BRPOP waiting for the next job, and a parked connection cannot carry another
+ * command. The ZADD would sit in ioredis's queue until a job happened to arrive,
+ * which could be never on an idle queue: the retry would simply not be scheduled.
+ *
+ * So: one connection blocks, one works. Phase 5's heartbeat will use this one too,
+ * for exactly the same reason.
+ */
+const scheduling = createRedis(`${WORKER_ID}:scheduling`, log);
+
+/**
  * Postgres gets a pool rather than a single connection, because nothing here parks
  * a connection indefinitely the way BRPOP does — see the comment in shared/db.ts.
  */
@@ -63,7 +78,7 @@ async function processOne(jobId: string): Promise<void> {
   const rows = await query<JobRow>(
     db,
     `SELECT id, type, payload, status, attempts, max_attempts, last_error,
-            idempotency_key, created_at, started_at, completed_at
+            idempotency_key, created_at, started_at, completed_at, next_run_at
        FROM jobs WHERE id = $1`,
     [jobId],
   );
@@ -147,25 +162,70 @@ async function processOne(jobId: string): Promise<void> {
     log.info(job.id, "succeeded");
   } catch (err) {
     /**
-     * FAILURE — terminal, for now.
+     * FAILURE — retry, or give up.
      *
-     * There is no retry, no backoff and no dead-letter queue: the error is recorded
-     * and the job stops here. That is GAP-2.3, and it closes in Phase 4.
-     *
-     * What is different from Phase 1 is that the failure is no longer invisible.
-     * The row says failed, last_error says why, and attempts says how many times it
-     * was tried. In Phase 1 this information existed only in a terminal.
+     * The job has already been attempted `job.attempts` times (the claim above
+     * incremented it). If it has attempts left it is parked for a backoff; if not
+     * it becomes dead and waits in the dead-letter queue for a human.
      */
     const message = err instanceof Error ? err.message : String(err);
 
+    if (job.attempts >= job.maxAttempts) {
+      /**
+       * Out of attempts. 'dead' is terminal, and the dead-letter queue is simply
+       * `WHERE status = 'dead'` — no separate Redis list, because a second copy of
+       * this fact could disagree with the row that has the error and the timings.
+       *
+       * A DLQ is an inbox, not a graveyard: someone reads it, fixes the cause, and
+       * replays. That is what POST /jobs/:id/replay is for.
+       */
+      await query(
+        db,
+        `UPDATE jobs SET status = 'dead', last_error = $2, completed_at = now(),
+                         next_run_at = NULL
+          WHERE id = $1`,
+        [job.id, message],
+      );
+
+      log.error(job.id, `dead after ${job.attempts} attempts: ${message}`);
+      return;
+    }
+
+    const delayMs = nextDelayMs(job.attempts);
+    const runAt = new Date(Date.now() + delayMs);
+
+    /**
+     * Row first, then the sorted set — the same ordering as the API's insert-then-
+     * enqueue, for the same reason. A crash between the two leaves a 'retrying' row
+     * with a next_run_at that a query can find. Reversed, it would leave a
+     * scheduled id whose row still says 'running', and nothing would reconcile it.
+     */
     await query(
       db,
-      `UPDATE jobs SET status = 'failed', last_error = $2, completed_at = now()
+      `UPDATE jobs SET status = 'retrying', last_error = $2, next_run_at = $3
         WHERE id = $1`,
-      [job.id, message],
+      [job.id, message, runAt],
     );
 
-    log.error(job.id, `failed: ${message}`);
+    /**
+     * ZADD, not sleep().
+     *
+     * Sleeping here would hold this worker's slot for the whole backoff — sixteen
+     * seconds of capacity spent waiting — and a worker killed during that sleep
+     * would take the retry with it. Parking the job in Redis returns the slot
+     * immediately, survives this process entirely, and lets ANY worker run the job
+     * once the scheduler promotes it.
+     *
+     * The score is the epoch-ms it becomes due, which is what makes
+     * ZRANGEBYSCORE 0 <now> the whole of "what is due?".
+     */
+    await scheduling.zadd(KEYS.delayed, runAt.getTime(), job.id);
+
+    log.error(
+      job.id,
+      `attempt ${job.attempts}/${job.maxAttempts} failed: ${message}` +
+        ` — retry in ${(delayMs / 1000).toFixed(1)}s`,
+    );
   }
 }
 
