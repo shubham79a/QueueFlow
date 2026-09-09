@@ -2,17 +2,26 @@ import { KEYS } from "../shared/keys.js";
 import { createLogger } from "../shared/log.js";
 import { createRedis } from "../shared/redis.js";
 import { createDb, query } from "../shared/db.js";
+import { reapDead, sweepOrphans } from "./reaper.js";
 
 /**
- * The retry scheduler.
+ * The scheduler.
  *
- * One job: move jobs whose backoff has elapsed out of the delayed sorted set and
- * back onto the pending list, where any worker can take them.
+ * One job, stated once: PUT JOBS BACK ON THE PENDING LIST. There are three reasons
+ * a job needs putting back, and this process is the only thing that knows about
+ * any of them:
  *
- * A separate process rather than a loop inside each worker, for two reasons. It is
- * visible — you can watch it, and you can kill it and see retries stop, which is
- * the honest way to learn that it is a single point of failure. And it keeps the
- * worker's job description to one sentence.
+ *   its backoff elapsed        promoteDue()   — a failed job whose retry is due
+ *   its worker stopped talking reapDead()     — a crash, and the job was rescued
+ *   it was never queued at all sweepOrphans() — the API died mid-enqueue
+ *
+ * All three are the same sentence with a different cause, which is why they belong
+ * in one process rather than three. A worker's job description stays "run the next
+ * job"; everything about work that is not currently moving lives here.
+ *
+ * A separate process rather than a loop inside each worker, because it is visible:
+ * you can watch it, and you can kill it and see retries stop and crashed jobs stay
+ * stuck — the honest way to learn that it is a single point of failure (GAP-4.2).
  */
 const SCHEDULER_ID = process.env.SCHEDULER_ID ?? "s1";
 
@@ -21,6 +30,17 @@ const MAX_SLEEP_MS = 1000;
 
 /** Cap on how many jobs are promoted per pass, so one burst cannot monopolise. */
 const BATCH = 100;
+
+/**
+ * How often to look for dead workers and orphaned rows.
+ *
+ * Much less often than the retry check, because both are answers to rare events
+ * and both cost more to ask: a SCAN of the keyspace and a query against the jobs
+ * table, versus one ZRANGE. Recovery latency is dominated by the heartbeat TTL
+ * anyway — a job cannot be rescued before its owner has been quiet for TTL
+ * seconds, so checking far more often than that buys nothing.
+ */
+const REAP_INTERVAL_MS = Math.max(200, Number(process.env.REAP_INTERVAL_MS ?? 5_000));
 
 const log = createLogger(SCHEDULER_ID);
 const redis = createRedis(SCHEDULER_ID, log);
@@ -97,11 +117,53 @@ async function sleepUntilNextDue(): Promise<void> {
   await sleep(Math.max(0, Math.min(waitMs, MAX_SLEEP_MS)));
 }
 
+/**
+ * The recovery pass — dead workers, then orphans, in that order.
+ *
+ * The order is not arbitrary. Reaping moves ids out of a dead worker's processing
+ * list and back into pending; sweeping asks "which 'queued' rows are in no Redis
+ * structure at all?". Sweeping first would see rows the reaper is about to fix and
+ * push their ids a second time.
+ *
+ * Errors are caught rather than allowed to escape. A failure here — Postgres
+ * blinking, a connection reset mid-SCAN — must not take down the process that
+ * every retry in the system depends on. The next pass tries again in a few
+ * seconds, and the jobs are still sitting safely in Redis in the meantime.
+ */
+async function recoverLostWork(): Promise<void> {
+  try {
+    const reaped = await reapDead(redis, db, log);
+    const swept = await sweepOrphans(redis, db, log);
+
+    if (reaped > 0 || swept > 0) {
+      log.info(null, `recovery pass: ${reaped} rescued from dead workers, ${swept} orphans queued`);
+    }
+  } catch (err) {
+    log.error(null, `recovery pass failed: ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
 async function main(): Promise<void> {
-  log.info(null, `scheduler ${SCHEDULER_ID} up, watching ${KEYS.delayed}`);
+  log.info(
+    null,
+    `scheduler ${SCHEDULER_ID} up, watching ${KEYS.delayed}` +
+      ` and reaping every ${REAP_INTERVAL_MS}ms`,
+  );
+
+  let nextReapAt = 0;
 
   while (true) {
     const promoted = await promoteDue();
+
+    // Time-gated rather than run every pass: the loop above spins as fast as work
+    // arrives, and the expensive checks should not spin with it.
+    if (Date.now() >= nextReapAt) {
+      nextReapAt = Date.now() + REAP_INTERVAL_MS;
+      await recoverLostWork();
+    }
+
+    // sleepUntilNextDue caps at MAX_SLEEP_MS, so the reap gate above is still
+    // reached about once a second even when the delayed set is empty.
     if (promoted === 0) await sleepUntilNextDue();
   }
 }
