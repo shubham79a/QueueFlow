@@ -5,11 +5,11 @@ and a way to observe it — so it is a demonstrable fact rather than a claim.
 
 | ID | Gap | Closed by |
 | --- | --- | --- |
-| GAP-2.1 | Orphaned `queued` rows — crash between the insert and the push, no sweeper | Phase 5 |
-| GAP-2.2 | Jobs stick at `running` forever when a worker dies | Phase 5 |
+| GAP-2.1 | Orphaned `queued` rows — crash between the insert and the push, no sweeper | **closed** — orphan sweep |
+| GAP-2.2 | Jobs stick at `running` forever when a worker dies | **closed** — handoff, heartbeat, reaper |
 | GAP-2.3 | No retry, backoff or dead-letter queue; a failure is terminal | Phase 4 |
-| GAP-2.4 | `job_effects` is written on success only | Phase 5 |
-| GAP-2.5 | `max_attempts` and `idempotency_key` exist but are unused | Phase 4 / 5 |
+| GAP-2.4 | `job_effects` is written on success only | still open — see GAP-5.1 |
+| GAP-2.5 | `max_attempts` and `idempotency_key` exist but are unused | **closed** — both now used |
 | GAP-2.6 | No graceful shutdown | Phase 7 |
 
 ---
@@ -50,7 +50,9 @@ Compare with the reversed write order, which would have produced a worker holdin
 row behind it: nothing to query, nothing to recover, no record the job existed. **An orphan you
 can find beats a ghost you cannot.**
 
-**Closed by.** Phase 5.
+**Closed.** `sweepOrphans` in `src/scheduler/reaper.ts` runs this same question every few seconds and
+pushes what it finds. It was held back until leases existed: re-pushing an id risks running a job
+twice, and that was only worth doing once a second run could not corrupt the record.
 
 ---
 
@@ -76,7 +78,9 @@ SELECT id, status, started_at, completed_at FROM jobs
 row, no evidence. The job is still lost, but it is now visible, and that stuck row is precisely
 what the Phase 5 reaper will hunt for.
 
-**Closed by.** Phase 5 — `BLMOVE` into a per-worker processing list, heartbeat with a TTL, reaper.
+**Closed.** `BLMOVE` into a per-worker processing list, a heartbeat key with a TTL, and a reaper in
+the scheduler. The stuck row is now the reaper's cue rather than the only evidence — see
+`test/crash.test.ts`, which kills a worker mid-job and asserts the job comes back and runs once.
 
 ---
 
@@ -121,7 +125,11 @@ SELECT id FROM jobs WHERE status = 'succeeded'
   AND id NOT IN (SELECT job_id FROM job_effects);                              -- never ran?
 ```
 
-**Closed by.** Phase 5.
+**Still open.** Leases made "did this already happen?" answerable for the RECORD, which is what the
+correctness queries read, and that turned out to be the useful half. Moving the effect row into the
+handler — recorded at the moment the side effect happens rather than when the job completes — was
+not built, and the reason it still would not be enough is GAP-5.1: the row would say a webhook was
+sent, and the webhook would already have been sent twice regardless.
 
 ---
 
@@ -135,7 +143,10 @@ and adding columns to a table that already has history is churn. The `UNIQUE` co
 particular is the durable half of Phase 5's idempotency — Redis keys expire, a database constraint
 does not — so having it in place from the start is deliberate.
 
-**Closed by.** Phase 4 (`max_attempts`), Phase 5 (`idempotency_key`).
+**Closed.** `max_attempts` bounds retries and now also bounds how many times the reaper will rescue a
+job that keeps killing its worker. `idempotency_key` is read from the `Idempotency-Key` header on
+`POST /jobs`, and the `UNIQUE` constraint declared here three phases early is what decides a duplicate
+submission — exactly the use it was reserved for.
 
 ---
 

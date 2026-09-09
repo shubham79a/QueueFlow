@@ -6,8 +6,8 @@ Deliberate omissions. Each says what is missing, why it was left, and how to see
 | --- | --- | --- |
 | GAP-4.1 | Every error is treated as retryable | not planned |
 | GAP-4.2 | The scheduler is a single point of failure, and a silent one | not planned — run two |
-| GAP-4.3 | Retries only cover handlers that *threw*; a killed worker still strands its job | Phase 5 |
-| GAP-4.4 | Retrying an unknown outcome can duplicate a side effect | Phase 5 |
+| GAP-4.3 | Retries only cover handlers that *threw*; a killed worker still strands its job | **closed** — reaper |
+| GAP-4.4 | Retrying an unknown outcome can duplicate a side effect | **half closed** — record only, see GAP-5.1 |
 | GAP-4.5 | One retry policy for everything; `max_attempts` is never varied | not planned |
 | GAP-4.6 | A replayed job loses its history | not planned |
 
@@ -74,7 +74,10 @@ SELECT status, attempts, next_run_at FROM jobs WHERE status = 'running';
 Still `running`, `next_run_at` NULL, nothing scheduled. Compare with `always_fail`, which reaches
 `dead` on its own.
 
-**Closed by.** Phase 5 — `BLMOVE`, heartbeat, reaper.
+**Closed.** The retry is no longer the only recovery path. A process failure is now caught by a
+different mechanism entirely — the job's id survives the crash in a processing list, the worker's
+silence is detected by an expiring heartbeat, and the reaper returns the job to the queue. A handler
+that throws and a worker that dies now converge on the same outcome: the job runs again.
 
 ---
 
@@ -102,7 +105,15 @@ indistinguishable from one that is dead. The answer is not to prevent the second
 it harmless — which is what `X-QueueFlow-Job-Id` on every request and the unused
 `idempotency_key UNIQUE` column are already in place for.
 
-**Closed by.** Phase 5.
+**Half closed, and the half that remains is the point.** The lease closed the record: one job now
+produces one `job_effects` row even when two workers ran it. The `Idempotency-Key` header closed the
+other direction, where a caller submits the same work twice.
+
+Neither touches the delivery itself. A worker fenced out at commit time had already sent its request
+several seconds earlier, and no mechanism in this system can recall it. That is GAP-5.1, it is not
+fixable from this side, and the answer is the receiver recognising the `X-QueueFlow-Job-Id` it has
+already handled — which `/hook/idempotent` demonstrates and `test/crash.test.ts` asserts: one effect
+row, **two** deliveries, one applied.
 
 ---
 

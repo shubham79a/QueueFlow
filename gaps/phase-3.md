@@ -7,7 +7,7 @@ Deliberate omissions. Each says what is missing, why it was left, and how to obs
 | GAP-3.1 | No ordering guarantee once concurrency > 1 | not planned — documented |
 | GAP-3.2 | One shared slot pool for all job types; slow jobs starve fast ones | not planned |
 | GAP-3.3 | No rate limiting toward downstream services | not planned |
-| GAP-3.4 | A killed worker now strands up to `CONCURRENCY` jobs, not one | Phase 5 |
+| GAP-3.4 | A killed worker now strands up to `CONCURRENCY` jobs, not one | **closed** — handoff + reaper |
 | GAP-3.5 | No graceful shutdown, so a deploy strands `workers × concurrency` jobs | Phase 7 |
 | GAP-3.6 | Throughput is capped by Postgres commit rate, not by worker capacity | not planned — measured |
 
@@ -92,7 +92,10 @@ npm run dev:workers 1        # CONCURRENCY=5
 SELECT COUNT(*) FROM jobs WHERE status = 'running';   -- 5, and they stay that way
 ```
 
-**Closed by.** Phase 5 — `BLMOVE` into a per-worker processing list, heartbeat, reaper.
+**Closed.** `BLMOVE` moves every claimed id into a per-worker processing list, so a kill leaves all
+`CONCURRENCY` of them visible rather than none. The multiplier now works in the system's favour: one
+reap pass returns the whole set. `test/chaos.test.ts` kills workers running five jobs each, at random
+moments, across eight rounds, and ends with nothing lost.
 
 ---
 

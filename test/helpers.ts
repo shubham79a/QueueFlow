@@ -4,8 +4,8 @@ import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 import { Redis } from "ioredis";
 import { Pool } from "pg";
-import { KEYS } from "../src/shared/keys.js";
-import type { JobType } from "../src/shared/types.js";
+import { KEYS, scanKeys } from "../src/shared/keys.js";
+import type { JobRow, JobType } from "../src/shared/types.js";
 
 /**
  * Shared test harness.
@@ -41,8 +41,8 @@ function spawnProcess(entry: string, env: Record<string, string>) {
 }
 
 /** Start the retry scheduler and wait until it is watching the delayed set. */
-export async function spawnScheduler(): Promise<SpawnedWorker> {
-  const { child, output } = spawnProcess(schedulerEntry, { SCHEDULER_ID: "s1" });
+export async function spawnScheduler(env: Record<string, string> = {}): Promise<SpawnedWorker> {
+  const { child, output } = spawnProcess(schedulerEntry, { SCHEDULER_ID: "s1", ...env });
   const w: SpawnedWorker = { id: "s1", child, output };
   await waitFor(() => output.join("").includes("scheduler s1 up"), 30_000, "scheduler to start");
   return w;
@@ -66,10 +66,62 @@ export const db = new Pool({
   max: 4,
 });
 
-/** Wipe both stores so a rerun means something. */
+/**
+ * Wipe both stores so a rerun means something.
+ *
+ * The processing lists and heartbeat keys have to go too. A leftover
+ * `queueflow:processing:w1` from a crash test would be found by the next test's
+ * reaper and its ids pushed into pending — jobs from a previous run appearing in
+ * the middle of the next one, which is the kind of failure that takes an evening
+ * to understand.
+ */
 export async function reset(): Promise<void> {
   await db.query("TRUNCATE job_effects, jobs");
   await redis.del(KEYS.pending, KEYS.delayed);
+
+  const stale = [
+    ...(await scanKeys(redis, KEYS.processingPattern)),
+    ...(await scanKeys(redis, KEYS.alivePattern)),
+  ];
+  if (stale.length > 0) await redis.del(...stale);
+}
+
+/** The ids one worker is holding right now. */
+export async function processingList(workerId: string): Promise<string[]> {
+  return redis.lrange(KEYS.processing(workerId), 0, -1);
+}
+
+/** The ids waiting to be picked up. */
+export async function pendingList(): Promise<string[]> {
+  return redis.lrange(KEYS.pending, 0, -1);
+}
+
+/**
+ * Seconds left on a worker's heartbeat. -2 means the key is gone, which is the
+ * system's entire definition of "that worker is dead".
+ */
+export async function aliveTtl(workerId: string): Promise<number> {
+  return redis.ttl(KEYS.alive(workerId));
+}
+
+/** One job row, or undefined. */
+export async function jobRow(id: string): Promise<JobRow | undefined> {
+  const { rows } = await db.query<JobRow>(
+    `SELECT id, type, payload, status, attempts, max_attempts, last_error,
+            idempotency_key, created_at, started_at, completed_at, next_run_at, lease_id
+       FROM jobs WHERE id = $1`,
+    [id],
+  );
+  return rows[0];
+}
+
+/** How many times this job actually ran, according to the proof table. */
+export async function effectsFor(jobId: string): Promise<number> {
+  const { rows } = await db.query<{ n: string }>(
+    "SELECT COUNT(*)::text AS n FROM job_effects WHERE job_id = $1",
+    [jobId],
+  );
+  return Number(rows[0]?.n ?? 0);
 }
 
 export interface SpawnedWorker {
@@ -78,53 +130,71 @@ export interface SpawnedWorker {
   output: string[];
 }
 
-/** Start `count` worker processes with distinct ids, and wait until each is listening. */
-export async function spawnWorkers(count: number, concurrency = 1): Promise<SpawnedWorker[]> {
-  const workers: SpawnedWorker[] = [];
+/**
+ * Start ONE worker with a chosen id and environment, and wait until it is waiting
+ * on the queue.
+ *
+ * The env override is what makes the crash tests possible. A worker given
+ * HEARTBEAT_TTL_S=1 and HEARTBEAT_INTERVAL_MS=60000 is perfectly healthy and
+ * still stops proving it within a second — which is how a test reproduces "the
+ * detector was wrong about a living process" without having to arrange a real
+ * garbage-collection pause.
+ */
+export async function spawnWorker(
+  id: string,
+  env: Record<string, string> = {},
+): Promise<SpawnedWorker> {
+  const { child, output } = spawnProcess(workerEntry, {
+    WORKER_ID: id,
+    CONCURRENCY: "1",
+    ...env,
+  });
 
-  for (let i = 1; i <= count; i++) {
-    const id = `w${i}`;
-    const output: string[] = [];
-
-    const child = spawn(
-      process.execPath,
-      ["--import", "tsx", "--env-file=.env", workerEntry],
-      {
-        env: { ...process.env, WORKER_ID: id, CONCURRENCY: String(concurrency) },
-        stdio: ["ignore", "pipe", "pipe"],
-      },
-    );
-
-    child.stdout?.on("data", (c: Buffer) => output.push(c.toString()));
-    child.stderr?.on("data", (c: Buffer) => output.push(c.toString()));
-
-    workers.push({ id, child, output });
-  }
-
-  // Wait until every worker has actually reached its BRPOP, otherwise jobs
-  // enqueued immediately would all be taken by whichever process booted first and
-  // the test would prove nothing about distribution.
-  await Promise.all(
-    workers.map((w) =>
-      waitFor(() => w.output.join("").includes(`worker ${w.id} up`), 30_000, `${w.id} to start`),
-    ),
-  );
-
-  return workers;
+  const w: SpawnedWorker = { id, child, output };
+  await waitFor(() => output.join("").includes(`worker ${id} up`), 30_000, `${id} to start`);
+  return w;
 }
 
-/** SIGTERM every worker and wait for the processes to actually be gone. */
-export async function killWorkers(workers: SpawnedWorker[]): Promise<void> {
-  await Promise.all(
-    workers.map(
-      (w) =>
-        new Promise<void>((done) => {
-          if (w.child.exitCode !== null || w.child.signalCode !== null) return done();
-          w.child.once("exit", () => done());
-          w.child.kill("SIGKILL");
-        }),
+/** Start `count` worker processes with distinct ids, and wait until each is listening. */
+export async function spawnWorkers(
+  count: number,
+  concurrency = 1,
+  env: Record<string, string> = {},
+): Promise<SpawnedWorker[]> {
+  // Started together rather than one after another, because waiting for each to
+  // report "up" in turn would serialise several seconds of process startup.
+  //
+  // Every worker must have reached the queue before the test enqueues anything:
+  // jobs pushed while only the first process was listening would all go to that
+  // one, and a test about distribution would prove nothing.
+  return Promise.all(
+    Array.from({ length: count }, (_, i) =>
+      spawnWorker(`w${i + 1}`, { CONCURRENCY: String(concurrency), ...env }),
     ),
   );
+}
+
+/**
+ * SIGKILL one process and wait until it is actually gone.
+ *
+ * SIGKILL, not SIGTERM, and that is the whole point of these tests. SIGTERM can be
+ * caught and cleaned up after; SIGKILL cannot. No handler runs, no LREM happens,
+ * no final heartbeat is written — the process simply stops existing, exactly as it
+ * would if the machine lost power. Anything that survives this survived without
+ * the worker's cooperation.
+ */
+export async function killWorker(w: SpawnedWorker): Promise<void> {
+  if (w.child.exitCode !== null || w.child.signalCode !== null) return;
+
+  await new Promise<void>((done) => {
+    w.child.once("exit", () => done());
+    w.child.kill("SIGKILL");
+  });
+}
+
+/** SIGKILL every worker and wait for the processes to actually be gone. */
+export async function killWorkers(workers: SpawnedWorker[]): Promise<void> {
+  await Promise.all(workers.map(killWorker));
 }
 
 /**
