@@ -1,6 +1,11 @@
 import { randomUUID } from "node:crypto";
 import express from "express";
-import { KEYS } from "../shared/keys.js";
+import {
+  KEYS,
+  scanKeys,
+  workerIdFromAliveKey,
+  workerIdFromProcessingKey,
+} from "../shared/keys.js";
 import { createLogger } from "../shared/log.js";
 import { createRedis } from "../shared/redis.js";
 import { createDb, query } from "../shared/db.js";
@@ -23,7 +28,7 @@ app.use(express.json());
 
 const JOB_COLUMNS = `id, type, payload, status, attempts, max_attempts,
                      last_error, idempotency_key, created_at, started_at, completed_at,
-                     next_run_at`;
+                     next_run_at, lease_id`;
 
 /**
  * POST /jobs — the producer.
@@ -40,6 +45,18 @@ app.post("/jobs", async (req, res) => {
   }
   const invalid = validatePayload(type, payload);
   if (invalid) return res.status(400).json({ error: invalid });
+
+  /**
+   * Optional, and supplied by the CALLER — which is the only place it can come
+   * from. The caller is the only party that knows two of its requests mean the
+   * same thing; nothing observable about the second request distinguishes it from
+   * a legitimate second order for the same amount to the same address.
+   *
+   * The header spelling is the one Stripe popularised and most APIs now copy.
+   * NULL when absent, and NULLs do not collide in a UNIQUE index, so callers that
+   * do not send one keep the old behaviour exactly: every POST is a new job.
+   */
+  const idempotencyKey = req.get("Idempotency-Key") ?? null;
 
   const id = randomUUID();
 
@@ -67,11 +84,57 @@ app.post("/jobs", async (req, res) => {
    * gaps/phase-2.md, and it closes in Phase 5 where the machinery to tell
    * "queued and waiting" from "queued and lost" already has to exist.
    */
-  await query(
+  const inserted = await query<JobRow>(
     db,
-    `INSERT INTO jobs (id, type, payload, status) VALUES ($1, $2, $3, 'queued')`,
-    [id, type, JSON.stringify(payload)],
+    `INSERT INTO jobs (id, type, payload, status, idempotency_key)
+          VALUES ($1, $2, $3, 'queued', $4)
+     ON CONFLICT (idempotency_key) DO NOTHING
+       RETURNING ${JOB_COLUMNS}`,
+    [id, type, JSON.stringify(payload), idempotencyKey],
   );
+
+  /**
+   * NOTHING INSERTED means the key has been used before — this is a repeat of a
+   * request that already succeeded, and the honest answer is the job that request
+   * created, not a second job doing the same work.
+   *
+   * A DIFFERENT PROBLEM FROM THE ONE THE WORKER'S LEASE SOLVES, despite sharing
+   * the word "idempotency". The lease is about one job being RUN twice, inside
+   * this system, because a failure detector guessed wrong. This is about one piece
+   * of work being SUBMITTED twice, from outside, because the caller never found out
+   * whether the first attempt worked — the response was lost, the connection
+   * dropped, a proxy timed out. The caller retries, because that is the correct
+   * thing for a caller to do, and without this it gets a second charge, a second
+   * email, a second shipment.
+   *
+   * The check is the INSERT itself rather than a SELECT beforehand, for the same
+   * reason the replay endpoint below puts its condition inside the UPDATE: two
+   * simultaneous requests would both pass a prior SELECT and both insert. Here the
+   * UNIQUE constraint decides, and it is the database's job to decide.
+   *
+   * 200, not 202 — nothing was accepted this time, and the caller should be able
+   * to tell those apart.
+   */
+  if (!inserted[0]) {
+    const existing = await query<JobRow>(
+      db,
+      `SELECT ${JOB_COLUMNS} FROM jobs WHERE idempotency_key = $1`,
+      [idempotencyKey],
+    );
+    const first = existing[0];
+
+    // Only reachable if the row was deleted between the two statements, which
+    // nothing in this system does. Say something useful rather than crash.
+    if (!first) return res.status(409).json({ error: "idempotency key is in use" });
+
+    log.info(first.id, `duplicate submission (key ${idempotencyKey}) — returning the original`);
+
+    return res.status(200).json({
+      jobId: first.id,
+      status: first.status,
+      deduplicated: true,
+    });
+  }
 
   // Only the id. The payload lives in Postgres now, and duplicating it here would
   // create a second copy that can disagree with the first.
@@ -177,6 +240,58 @@ app.get("/jobs", async (req, res) => {
       );
 
   return res.json(rows.map(rowToJob));
+});
+
+/**
+ * GET /workers — who is out there, and what is each of them holding.
+ *
+ * Assembled entirely from Redis, never from anything this process knows locally.
+ * That is deliberate: the API has no connection to any worker and no idea how many
+ * exist, so a worker on another machine shows up here exactly like one running in
+ * the next terminal. The heartbeat key and the processing list ARE the worker's
+ * public presence; there is nothing else to ask.
+ *
+ * THE INTERESTING ROW IS `alive: false` WITH `holding` ABOVE ZERO. That is a
+ * worker that stopped talking while holding work — a crash, caught in the window
+ * between its heartbeat expiring and the reaper's next pass. Kill a worker mid-job
+ * and refresh this endpoint to watch it: first the TTL counts down, then `alive`
+ * flips to false while the jobs are still listed against it, then the jobs move
+ * back to pending and the row disappears.
+ */
+app.get("/workers", async (_req, res) => {
+  const ids = new Set<string>();
+
+  // Two sources, because they answer different questions. A heartbeat with no
+  // processing list is an idle worker; a processing list with no heartbeat is a
+  // dead one. Both are workers, and only the union finds them all.
+  for (const key of await scanKeys(redis, KEYS.alivePattern)) {
+    const id = workerIdFromAliveKey(key);
+    if (id !== null) ids.add(id);
+  }
+  for (const key of await scanKeys(redis, KEYS.processingPattern)) {
+    const id = workerIdFromProcessingKey(key);
+    if (id !== null) ids.add(id);
+  }
+
+  const workers = await Promise.all(
+    [...ids].sort().map(async (id) => {
+      // TTL returns -2 when the key is gone and -1 when it exists without an
+      // expiry. Only a positive number means "alive, and here is how long it has
+      // left before anything watching gives up on it".
+      const ttl = await redis.ttl(KEYS.alive(id));
+      const holding = await redis.lrange(KEYS.processing(id), 0, -1);
+
+      return {
+        id,
+        alive: ttl > 0,
+        expiresInSeconds: ttl > 0 ? ttl : null,
+        holding: holding.length,
+        jobs: holding,
+      };
+    }),
+  );
+
+  return res.json({ workers });
 });
 
 /**
