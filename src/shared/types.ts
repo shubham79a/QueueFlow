@@ -49,6 +49,11 @@ export interface JobRecord<T extends JobType = JobType> {
   completedAt: Date | null;
   /** When a 'retrying' job becomes due. NULL for every other status. */
   nextRunAt: Date | null;
+  /**
+   * Who currently has the right to speak for this job. Rewritten on every claim;
+   * a worker whose copy no longer matches has been fenced out and must not write.
+   */
+  leaseId: string | null;
 }
 
 /** Exactly the column set every SELECT in this project uses. */
@@ -65,6 +70,7 @@ export interface JobRow {
   started_at: Date | null;
   completed_at: Date | null;
   next_run_at: Date | null;
+  lease_id: string | null;
 }
 
 /**
@@ -87,6 +93,7 @@ export function rowToJob(row: JobRow): JobRecord {
     startedAt: row.started_at,
     completedAt: row.completed_at,
     nextRunAt: row.next_run_at,
+    leaseId: row.lease_id,
   };
 }
 

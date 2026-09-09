@@ -108,3 +108,36 @@ ALTER TABLE jobs ADD CONSTRAINT jobs_status_check
 -- Partial index: only retrying rows have a next_run_at worth looking up.
 CREATE INDEX IF NOT EXISTS jobs_next_run_at_idx ON jobs (next_run_at)
   WHERE status = 'retrying';
+
+-- ---------------------------------------------------------------------------
+-- Leases.
+--
+-- Once a job can be RESCUED from a worker that stopped responding, it can also be
+-- TAKEN from a worker that was merely slow — those are the same act, and no
+-- failure detector can tell the two apart, because over a network a process that
+-- has died and one that is quiet look identical.
+--
+-- So the job will sometimes run twice. This column is what stops it being
+-- RECORDED twice.
+--
+-- A worker claiming a job writes a fresh random value here and keeps a copy. Every
+-- later write about that job carries `AND lease_id = <the copy>`. If the job was
+-- reassigned in the meantime, the new owner's claim has already overwritten this
+-- column, so the old owner's UPDATE matches zero rows: it rolls back, writes no
+-- job_effects row, and says so in its log. Whoever holds the current lease is the
+-- only one who can speak for the job.
+--
+-- A COLUMN RATHER THAN A REDIS KEY, deliberately. The obvious alternative is
+-- SET NX with an expiry, and it fails at exactly the moment it is needed: the
+-- guard would expire during the long, slow execution that caused the trouble in
+-- the first place. A row does not expire. It is also the same transaction as the
+-- write it is guarding, so there is no window between checking and writing.
+--
+-- Note what is NOT added here: a UNIQUE constraint on job_effects(job_id). That
+-- would make duplicates impossible to record — and job_effects has to stay able to
+-- SHOW the duplicate, or the whole argument for this column is unfalsifiable.
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS lease_id UUID;
+
+-- Supports the human question "what is running, and since when?" — the query that
+-- used to be the only evidence a worker had died.
+CREATE INDEX IF NOT EXISTS jobs_running_idx ON jobs (started_at) WHERE status = 'running';
