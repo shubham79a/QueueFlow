@@ -1,14 +1,10 @@
-/**
- * A counting semaphore: at most N holders at a time.
- *
- * Twenty lines, no dependency. It exists so the worker can stop pulling work off
- * Redis when it has no capacity to run it — see the comment on the loop in
- * src/worker/index.ts for why that ordering is the whole point.
- *
- * `acquire()` returns immediately while permits remain, and otherwise returns a
- * promise that resolves when someone calls `release()`. Waiters are served in
- * arrival order, so a slot cannot be starved by later arrivals.
- */
+// A counting semaphore: at most N holders at a time.
+// Twenty lines, no dependency. It exists so the worker can stop pulling work off
+// Redis when it has no capacity to run it.
+// `acquire()` returns immediately while permits remain, and otherwise returns a
+// promise that resolves when someone calls `release()`. Waiters are served in
+// arrival order, so a slot cannot be starved by later arrivals.
+
 export class Semaphore {
   private available: number;
   private readonly waiting: Array<() => void> = [];
@@ -41,7 +37,7 @@ export class Semaphore {
     if (this.available < this.capacity) this.available += 1;
   }
 
-  /** In-flight count, for logging and for the drain check on shutdown. */
+  // In-flight count, for logging and for the drain check on shutdown.
   get inFlight(): number {
     return this.capacity - this.available;
   }

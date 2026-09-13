@@ -1,13 +1,8 @@
-/**
- * The shape of a job, on both sides of the two stores it now lives in.
- */
-
-/** Job types this system knows how to run. */
 export const JOB_TYPES = ["sleep", "always_fail", "deliver_webhook"] as const;
 
 export type JobType = (typeof JOB_TYPES)[number];
 
-/** Maps each job type to the payload it expects. */
+// Maps each job type to the payload it expects.
 export interface JobPayloads {
   sleep: { ms: number };
   /** A test fixture: throws so the failed path and last_error are reachable. */
@@ -28,13 +23,9 @@ export const JOB_STATUSES = [
 
 export type JobStatus = (typeof JOB_STATUSES)[number];
 
-/**
- * A row from the jobs table, already mapped out of snake_case.
- *
- * This replaces Phase 1's `Job`. The difference is not cosmetic: a Job used to be
- * something the API invented and put on a queue, and it is now a row that exists
- * whether or not anything is currently holding it.
- */
+// A row from the jobs table, already mapped out of snake_case.
+// The difference is not cosmetic: a Job used to be something the API invented and put on a queue, 
+// and it is now a row that exists whether or not anything is currently holding it.
 export interface JobRecord<T extends JobType = JobType> {
   id: string;
   type: T;
@@ -47,16 +38,14 @@ export interface JobRecord<T extends JobType = JobType> {
   createdAt: Date;
   startedAt: Date | null;
   completedAt: Date | null;
-  /** When a 'retrying' job becomes due. NULL for every other status. */
+  // When a 'retrying' job becomes due. NULL for every other status.
   nextRunAt: Date | null;
-  /**
-   * Who currently has the right to speak for this job. Rewritten on every claim;
-   * a worker whose copy no longer matches has been fenced out and must not write.
-   */
+  // Who currently has the right to speak for this job. Rewritten on every claim;
+  // a worker whose copy no longer matches has been fenced out and must not write.
   leaseId: string | null;
 }
 
-/** Exactly the column set every SELECT in this project uses. */
+// Exactly the column set every SELECT in this project uses.
 export interface JobRow {
   id: string;
   type: string;
@@ -73,12 +62,10 @@ export interface JobRow {
   lease_id: string | null;
 }
 
-/**
- * snake_case -> camelCase, in one place.
- *
- * Worth doing here rather than at each call site so that the database's naming
- * convention stops at this function instead of leaking through the whole codebase.
- */
+// snake_case -> camelCase, in one place.
+// Worth doing here rather than at each call site so that the database's naming
+// convention stops at this function instead of leaking through the whole codebase.
+
 export function rowToJob(row: JobRow): JobRecord {
   return {
     id: row.id,
@@ -97,18 +84,9 @@ export function rowToJob(row: JobRow): JobRecord {
   };
 }
 
-/**
- * The trust boundary moved, it did not disappear.
- *
- * In Phase 1 the worker pulled a whole JSON job out of Redis and had to validate
- * all of it. Now Redis carries a bare UUID and the payload comes from Postgres —
- * which this system wrote itself, after validating it at the API. So the check
- * that used to be `parseJob` shrinks to this: is the thing that came off the queue
- * even shaped like an id?
- *
- * It still has to exist. What comes back from BRPOP is a `string`, and TypeScript
- * cannot vouch for a string that arrived over a socket from another process.
- */
+// Postgress stores the data and all details, history and it is source of truth.
+// Redis stores only UUIDs, and fetch data from Postgres.
+
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 export function isUuid(value: string): boolean {
@@ -119,7 +97,7 @@ export function isJobType(value: unknown): value is JobType {
   return typeof value === "string" && (JOB_TYPES as readonly string[]).includes(value);
 }
 
-/** Validates a payload at the API boundary, where it arrives from outside. */
+// Validates a payload at the API boundary, where it arrives from outside.
 export function validatePayload(type: JobType, payload: unknown): string | null {
   if (typeof payload !== "object" || payload === null) return "payload must be an object";
 

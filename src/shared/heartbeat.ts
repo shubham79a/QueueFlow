@@ -2,58 +2,44 @@ import type { Redis } from "ioredis";
 import { KEYS } from "./keys.js";
 import type { Logger } from "./log.js";
 
-/**
- * The heartbeat: how a worker says "still here", and how the system finds out when
- * it stops saying it.
- *
- * There is no monitor process, no ping, no timeout bookkeeping. The worker writes
- * a key with a short expiry and keeps rewriting it. When the process dies it stops
- * writing, and Redis deletes the key by itself once the expiry passes. THE ABSENCE
- * OF THE KEY IS THE DEATH NOTICE, and it is produced by Redis's own expiry
- * machinery rather than by any code here.
- *
- * That is the cheapest failure detector available — one SET per worker per
- * interval, and nothing at all to run on the watching side.
- */
+// The heartbeat: how a worker says "still here", and how the system finds out when it stops saying it.
 
-/**
- * How long the key survives without a refresh.
- *
- * THE RATIO TO THE INTERVAL IS THE WHOLE SETTING, and getting it wrong is the
- * classic way to build a system that eats its own workers. The TTL must be a
- * comfortable multiple of the interval, because a beat can be late for reasons
- * that are not death: a garbage-collection pause, a slow moment on the Redis
- * connection, a machine briefly starved of CPU.
- *
- * At the defaults — beat every 10s, key lives 30s — a worker can miss two beats in
- * a row and still not be declared dead. Set the TTL below the interval and a
- * perfectly healthy worker is pronounced dead between every pair of beats, which
- * is exactly the misconfiguration the crash tests use on purpose to force the
- * double-execution case into the open.
- */
+// There is no monitor process, no ping, no timeout bookkeeping. The worker writes a key with a short expiry and keeps 
+// rewriting it. When the process dies it stops writing, and Redis deletes the key by itself once the expiry passes.
+// THE ABSENCE OF THE KEY IS THE DEATH NOTICE, and it is produced by Redis's own expiry machinery rather than by any code here.
+
+// How long the key survives without a refresh.
+
+// THE RATIO TO THE INTERVAL IS THE WHOLE SETTING, and getting it wrong is the classic way to build a system that eats its
+// own workers. The TTL must be a comfortable multiple of the interval, because a beat can be late for reasons
+// that are not death: a garbage-collection pause, a slow moment on the Redis connection, a machine briefly starved of CPU.
+
+// At the defaults — beat every 10s, key lives 30s — a worker can miss two beats in a row and still not be declared dead. 
+// Set the TTL below the interval and a perfectly healthy worker is pronounced dead between every pair of beats, which
+// is exactly the misconfiguration the crash tests use on purpose to force the double-execution case into the open.
+
 export const TTL_S = Math.max(1, Number(process.env.HEARTBEAT_TTL_S ?? 30));
 
-/** How often the key is rewritten. Should be well under a third of the TTL. */
+// How often the key is rewritten. Should be well under a third of the TTL.
 const INTERVAL_MS = Math.max(200, Number(process.env.HEARTBEAT_INTERVAL_MS ?? 10_000));
 
 export interface Heartbeat {
-  /** Stop beating. The key then expires on its own within TTL_S. */
+  // Stop beating. The key then expires on its own within TTL_S.
   stop(): void;
 }
 
-/**
- * Start beating, and do not return until the FIRST beat has landed.
- *
- * The await matters. If the worker started taking jobs before its first beat was
- * written, it would be holding work while looking dead to everyone else, and the
- * reaper would rescue jobs out from under a worker that had only just started.
- *
- * @param redis a NON-BLOCKING connection. Handing this the connection parked on
- *   BLMOVE would queue every beat behind the wait for the next job, so an idle
- *   worker — the one with the most capacity to spare — would be the first to be
- *   declared dead. This is the constraint that has made createRedis a factory
- *   since the first commit, finally being paid for.
- */
+// Start beating, and do not return until the FIRST beat has landed.
+
+// The await matters. If the worker started taking jobs before its first beat was
+// written, it would be holding work while looking dead to everyone else, and the
+// reaper would rescue jobs out from under a worker that had only just started.
+
+// @param redis a NON-BLOCKING connection. Handing this the connection parked on
+// BLMOVE would queue every beat behind the wait for the next job, so an idle
+// worker — the one with the most capacity to spare — would be the first to be
+// declared dead. This is the constraint that has made createRedis a factory
+// since the first commit, finally being paid for.
+
 export async function startHeartbeat(
   redis: Redis,
   workerId: string,

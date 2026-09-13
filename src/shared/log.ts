@@ -1,18 +1,19 @@
 /**
- * Log format, from project.md:
- *
+ * Log format:
+ *   time [worker] job_id message 
  *   14:32:07.412 [w1]  job_a1b2c3d4  started (sleep 5000ms)
  *   14:32:12.418 [w1]  job_a1b2c3d4  finished in 5.006s
  *
  * The point of the format is that a job is traceable ACROSS processes. The API
- * and the worker are separate terminals; the only way to follow one job through
- * both is if the same id is printed the same way in each. That matters more once
- * three workers are interleaving their output in Phase 3.
- */
+ * and the worker will be running in the separate terminals; the only way to 
+ * follow one job through both is if the same id is printed the same way in each.
+ * That matters more when we run three workers are interleaving their output.
+*/
 
-/** First 8 chars of the UUID. Enough to be unique on screen, short enough to scan. */
+// First 8 chars of the UUID is enough to be uniquely identify on screen, short enough to scan.
 export function shortId(jobId: string): string {
-  return `job_${jobId.slice(0, 8)}`;
+  const sID = jobId.slice(0, 8);
+  return `job_${sID}`;
 }
 
 function stamp(): string {
