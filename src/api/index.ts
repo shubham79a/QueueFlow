@@ -30,13 +30,9 @@ const JOB_COLUMNS = `id, type, payload, status, attempts, max_attempts,
                      last_error, idempotency_key, created_at, started_at, completed_at,
                      next_run_at, lease_id`;
 
-/**
- * POST /jobs — the producer.
- *
- * The handler still does not run the job, wait for it, or ever learn whether it
- * succeeded. What changed is that the job now exists somewhere permanent before
- * anyone is told about it.
- */
+// POST /jobs — the producer.
+// The handler still does not run the job, wait for it, or ever learn whether it succeeded.
+
 app.post("/jobs", async (req, res) => {
   const { type, payload } = req.body ?? {};
 
@@ -46,44 +42,27 @@ app.post("/jobs", async (req, res) => {
   const invalid = validatePayload(type, payload);
   if (invalid) return res.status(400).json({ error: invalid });
 
-  /**
-   * Optional, and supplied by the CALLER — which is the only place it can come
-   * from. The caller is the only party that knows two of its requests mean the
-   * same thing; nothing observable about the second request distinguishes it from
-   * a legitimate second order for the same amount to the same address.
-   *
-   * The header spelling is the one Stripe popularised and most APIs now copy.
-   * NULL when absent, and NULLs do not collide in a UNIQUE index, so callers that
-   * do not send one keep the old behaviour exactly: every POST is a new job.
-   */
+  // Optional, and supplied by the CALLER — which is the only place it can come
+  // from. The caller is the only party that knows two of its requests mean the
+  // same thing; nothing observable about the second request distinguishes it from
+  // a legitimate second order for the same amount to the same address.
+
+  // The header spelling is the one Stripe popularised and most APIs now copy.
+  // NULL when absent, and NULLs do not collide in a UNIQUE index, so callers that
+  // do not send one keep the old behaviour exactly: every POST is a new job.
+
   const idempotencyKey = req.get("Idempotency-Key") ?? null;
 
   const id = randomUUID();
 
-  /**
-   * TWO WRITES, TWO STORES, AND NO WAY TO MAKE THEM ATOMIC.
-   *
-   * There is no transaction that spans Postgres and Redis. Whatever happens, this
-   * process can die between these two statements, so the only real decision is
-   * which order leaves the better wreckage:
-   *
-   *   insert then push  — crash between them leaves a 'queued' row that no worker
-   *                       will ever pick up. It is in the database. One query
-   *                       finds it. Something can requeue it later.
-   *
-   *   push then insert  — crash between them leaves a worker holding an id with no
-   *                       row behind it. It cannot know what to run, cannot report
-   *                       anything useful, and nothing anywhere records that a job
-   *                       was ever accepted.
-   *
-   * An orphan you can find beats a ghost you cannot. Record the intent, then do
-   * the thing — the same instinct as a database write-ahead log, which writes what
-   * it is about to do before doing it precisely so a crash is recoverable.
-   *
-   * The orphan case is real and is not handled here; it is GAP-2.1 in
-   * gaps/phase-2.md, and it closes in Phase 5 where the machinery to tell
-   * "queued and waiting" from "queued and lost" already has to exist.
-   */
+  // TWO WRITES, TWO STORES, AND NO WAY TO MAKE THEM ATOMIC. Redis and Postgress
+  // There is no transaction that spans Postgres and Redis. Whatever happens, this process can die between 
+  // these two statements, so the only real decision is which order leaves the better wreckage:
+  //  insert then push  — crash between them leaves a 'queued' row that no worker
+  //     (Orphan)         will ever pick up. It is in the DB. One query finds it and can requeue it later.
+  //  push then insert  — crash between them leaves a worker holding an id with no
+  //     (Ghost)          row behind it. It cannot know what to run, cannot report anything useful. No DB Record.
+
   const inserted = await query<JobRow>(
     db,
     `INSERT INTO jobs (id, type, payload, status, idempotency_key)
@@ -93,28 +72,20 @@ app.post("/jobs", async (req, res) => {
     [id, type, JSON.stringify(payload), idempotencyKey],
   );
 
-  /**
-   * NOTHING INSERTED means the key has been used before — this is a repeat of a
-   * request that already succeeded, and the honest answer is the job that request
-   * created, not a second job doing the same work.
-   *
-   * A DIFFERENT PROBLEM FROM THE ONE THE WORKER'S LEASE SOLVES, despite sharing
-   * the word "idempotency". The lease is about one job being RUN twice, inside
-   * this system, because a failure detector guessed wrong. This is about one piece
-   * of work being SUBMITTED twice, from outside, because the caller never found out
-   * whether the first attempt worked — the response was lost, the connection
-   * dropped, a proxy timed out. The caller retries, because that is the correct
-   * thing for a caller to do, and without this it gets a second charge, a second
-   * email, a second shipment.
-   *
-   * The check is the INSERT itself rather than a SELECT beforehand, for the same
-   * reason the replay endpoint below puts its condition inside the UPDATE: two
-   * simultaneous requests would both pass a prior SELECT and both insert. Here the
-   * UNIQUE constraint decides, and it is the database's job to decide.
-   *
-   * 200, not 202 — nothing was accepted this time, and the caller should be able
-   * to tell those apart.
-   */
+
+  // Idempotency check — NOTHING INSERTED means the key has been used before — this is a repeat of a request that
+  // already succeeded, and the honest answer is the job that request created, not a second job doing the same work.
+  // Lease: used when an worker dies and lease id help you to avoid commit to db by comparing lease id stored in db.
+
+  // Issue: client submitting same task twice, but the first submission was lost due to network issues. The client retries,
+  // and without this check, it would create a duplicate job. The UNIQUE constraint on the idempotency key ensures that only
+  // one job is created for the same key.
+
+  // The check is the INSERT itself rather than a SELECT beforehand, for the same reason the replay endpoint below
+  // puts its condition inside the UPDATE: two simultaneous requests would both pass a prior SELECT and both insert. 
+  // Here the UNIQUE constraint decides, and it is the database's job to decide. 200, not 202 — nothing was 
+  // accepted this time, and the caller should be able to tell those apart.
+
   if (!inserted[0]) {
     const existing = await query<JobRow>(
       db,
@@ -136,8 +107,7 @@ app.post("/jobs", async (req, res) => {
     });
   }
 
-  // Only the id. The payload lives in Postgres now, and duplicating it here would
-  // create a second copy that can disagree with the first.
+  // Only the id. The payload lives in Postgres now, and duplicating it here would create a second copy that can disagree with the first.
   await redis.lpush(KEYS.pending, id);
 
   log.info(id, `queued (${type})`);
@@ -145,15 +115,8 @@ app.post("/jobs", async (req, res) => {
   return res.status(202).json({ jobId: id, status: "queued" });
 });
 
-/**
- * GET /jobs/:id
- *
- * This is the endpoint Phase 1 could not build. A job sitting inside a Redis list
- * has no address — you cannot ask a list about one entry without scanning it, and
- * once a worker popped it, it was nowhere at all. A row has a primary key, so the
- * question "what happened to this job?" now has an answer, and it keeps having one
- * long after the job finished.
- */
+// GET /jobs/:id — the consumer, or anyone else who wants to know what happened to a job.
+
 app.get("/jobs/:id", async (req, res) => {
   const rows = await query<JobRow>(
     db,
@@ -167,30 +130,19 @@ app.get("/jobs/:id", async (req, res) => {
   return res.json(rowToJob(row));
 });
 
-/**
- * POST /jobs/:id/replay — the dead-letter queue's exit door.
- *
- * A DLQ is an inbox, not a graveyard. Jobs land there because something was wrong
- * — a receiver was misconfigured, a payload was malformed, a downstream service
- * was down for longer than the backoff allowed. Someone reads it, fixes the cause,
- * and replays. Without this endpoint 'dead' would just mean 'discarded', and the
- * DLQ would be a table nobody could act on.
- *
- * The attempt counter resets, because the retries that were exhausted were spent
- * against the old, broken conditions. Keeping the count would mean a replayed job
- * gets zero real attempts under the fixed ones.
- */
+// POST /jobs/:id/replay — the dead-letter queue's exit door.
+
+// DLQ = Dead Letter Queue. Dead jobs who exhausted their attempts need human intervention to fix the cause of failure.
+// Attempt counter resets with new conditions, because the retries that were exhausted were spent against the old, broken conditions.
+
 app.post("/jobs/:id/replay", async (req, res) => {
   const { id } = req.params;
+  // update is atomic, so no need to check if the job is dead first. If it is not, the update will return 0 rows and we can handle that case.
+  // seprate? why not?
 
-  /**
-   * The status check is inside the UPDATE, not a separate SELECT-then-UPDATE.
-   *
-   * Two admins clicking replay at the same moment would both pass a prior SELECT,
-   * and both would push the id — the job would run twice. Making the condition
-   * part of the write means the second UPDATE matches zero rows, and Postgres's
-   * row locking settles it.
-   */
+  // Two admins clicking replay at the same moment would both pass a prior SELECT, and both would push the id — the job would run twice.
+  // Making the condition part of the write means the second UPDATE matches zero rows, and Postgres's row locking settles it.
+
   const rows = await query<JobRow>(
     db,
     `UPDATE jobs
@@ -222,22 +174,22 @@ app.post("/jobs/:id/replay", async (req, res) => {
   return res.status(202).json({ jobId: id, status: "queued" });
 });
 
-/** GET /jobs?status=&limit= — recent jobs, newest first. */
+// GET /jobs?status=&limit= — recent jobs, newest first. 
 app.get("/jobs", async (req, res) => {
   const status = req.query.status as JobStatus | undefined;
   const limit = Math.min(Number(req.query.limit ?? 20), 100);
 
   const rows = status
     ? await query<JobRow>(
-        db,
-        `SELECT ${JOB_COLUMNS} FROM jobs WHERE status = $1 ORDER BY created_at DESC LIMIT $2`,
-        [status, limit],
-      )
+      db,
+      `SELECT ${JOB_COLUMNS} FROM jobs WHERE status = $1 ORDER BY created_at DESC LIMIT $2`,
+      [status, limit],
+    )
     : await query<JobRow>(
-        db,
-        `SELECT ${JOB_COLUMNS} FROM jobs ORDER BY created_at DESC LIMIT $1`,
-        [limit],
-      );
+      db,
+      `SELECT ${JOB_COLUMNS} FROM jobs ORDER BY created_at DESC LIMIT $1`,
+      [limit],
+    );
 
   return res.json(rows.map(rowToJob));
 });
@@ -294,12 +246,10 @@ app.get("/workers", async (_req, res) => {
   return res.json({ workers });
 });
 
-/**
- * Health of the dependencies, not of this process. Both are reported separately
- * because they fail differently and mean different things: without Redis nothing
- * can be dispatched, and without Postgres nothing can be recorded — and this API
- * refuses to accept work it cannot record.
- */
+// Health of the dependencies, not of this process. Both are reported separately because they fail differently and mean
+// different things: without Redis nothing can be dispatched, and without Postgres nothing can be recorded — and
+// this API refuses to accept work it cannot record.
+
 app.get("/health", async (_req, res) => {
   const health: Record<string, unknown> = { status: "ok" };
 

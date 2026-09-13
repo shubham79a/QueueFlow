@@ -3,15 +3,7 @@ import type { Logger } from "../shared/log.js";
 
 type Handler = (job: JobRecord, log: Logger) => Promise<void>;
 
-/**
- * Deliberately boring, and kept on purpose.
- *
- * A real handler is a bad test subject for reliability work: when a webhook
- * delivery fails you cannot tell whether your reaper is broken or the receiver
- * is. This one has no failure modes of its own, takes a precisely known time, and
- * is trivially killable mid-flight — a controlled variable. Production queues
- * carry a job type like this for exactly the same reason.
- */
+// A real handler is bad test subject because if it has failure, you cannot tell whether your reaper is broken or the receiver is. 
 const sleep: Handler = async (job, log) => {
   const { ms } = job.payload as JobPayloads["sleep"];
   log.info(job.id, `started  (sleep ${ms}ms)`);
@@ -22,34 +14,18 @@ const sleep: Handler = async (job, log) => {
   log.info(job.id, `handler done in ${((Date.now() - startedAt) / 1000).toFixed(3)}s`);
 };
 
-/**
- * A fixture, not a feature. Without a job type that reliably throws, the failed
- * branch and the last_error column are unreachable and therefore untested.
- */
+// For testing the reaper, a handler that always fails is useful. It is not a real job type, but it is a real handler, 
+// and it is the only one that can be used to test the reaper without depending on an external service.
 const alwaysFail: Handler = async (job) => {
   const { message } = job.payload as JobPayloads["always_fail"];
   throw new Error(message ?? "always_fail: this job type always throws");
 };
 
-/**
- * Deliver a webhook: POST JSON to someone else's server.
- *
- * This is the first handler that does real work, and it is the one that makes the
- * rest of the project matter. Everything about it is outside our control — the
- * receiver can be down, hung, overloaded, or simply slow — which is precisely why
- * work like this belongs in a queue rather than in a request handler.
- *
- * It is also what motivates the phases still to come:
- *
- *   Retries   a 503 from a service that is restarting deserves another attempt.
- *             Right now it does not get one, and the job is dead.
- *   Idempotency  delivering the same webhook twice is a real bug with real
- *             consequences for the receiver. Sleeping twice is harmless, which is
- *             why the argument for idempotency never lands until a handler has an
- *             effect on the outside world.
- *
- * Uses the built-in fetch (Node 18+). No HTTP library needed.
- */
+// Deliver a webhook: POST JSON to someone else's server.
+
+// This is the first handler that does real work. Everything about it is outside our control — the receiver can be down,
+// hung, overloaded, or simply slow — which is precisely why work like this belongs in a queue rather than in a request handler.
+
 const deliverWebhook: Handler = async (job, log) => {
   const { url, body, timeoutMs = 10_000 } = job.payload as JobPayloads["deliver_webhook"];
 
@@ -73,19 +49,18 @@ const deliverWebhook: Handler = async (job, log) => {
         "X-QueueFlow-Attempt": String(job.attempts),
       },
       body: JSON.stringify(body ?? {}),
-      /**
-       * Without a timeout, a receiver that accepts the connection and then never
-       * answers holds this worker forever. It would not fail, would not succeed,
-       * and would never release its slot — the worst of the three outcomes,
-       * because nothing anywhere would report a problem.
-       */
+
+      // Without a timeout, a receiver that accepts the connection and then never answers holds this worker forever. 
+      // It would not fail, would not succeed, and would never release its slot — the worst of the 
+      // three outcomes, because nothing anywhere would report a problem.
+
       signal: AbortSignal.timeout(timeoutMs),
     });
   } catch (err) {
     // Transport-level: DNS failure, connection refused, or the timeout above.
     // The request never got an answer, so we cannot know whether the receiver
-    // acted on it — which is exactly why the retry in Phase 4 will need the
-    // receiver to be idempotent, not just this sender.
+    // acted on it — which is exactly why a retry needs the receiver to be
+    // idempotent, not just this sender.
     const reason = err instanceof Error ? err.message : String(err);
     const kind = err instanceof Error && err.name === "TimeoutError" ? "timed out" : "unreachable";
     throw new Error(`${url} ${kind} after ${Date.now() - startedAt}ms: ${reason}`);
@@ -104,11 +79,9 @@ const deliverWebhook: Handler = async (job, log) => {
   log.info(job.id, `delivered ${response.status} in ${elapsed}ms`);
 };
 
-/**
- * Record<JobType, Handler> is exhaustive: add a name to JOB_TYPES and forget to
- * implement it here and the build fails. The type system will not let a job type
- * be accepted by the API that nothing can run.
- */
+// Record<JobType, Handler> is exhaustive: add a name to JOB_TYPES and forget to
+// implement it here and the build fails. The type system will not let a job type
+// be accepted by the API that nothing can run.
 export const handlers: Record<JobType, Handler> = {
   sleep,
   always_fail: alwaysFail,
