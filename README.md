@@ -86,10 +86,31 @@ Postgres and waits. Run as many as you like; nothing needs to be told they exist
 scheduler everything still runs, but a failed job never retries and a crashed worker's jobs never
 come back — which is worth seeing once, deliberately.
 
+### Dashboard
+
+A React app in [web/](web/) that shows jobs moving through the system, refreshing every two
+seconds. In development it runs on its own port and proxies API calls through:
+
+```bash
+cd web && npm install     # one time
+npm run dev:web           # http://localhost:5173
+```
+
+In production it is built to static files and **served by the API process itself** — one port, one
+deployable, no CORS:
+
+```bash
+npm run build:web         # web/dist
+npm run dev:api           # now also serves the dashboard at http://localhost:4000
+```
+
+The API checks for `web/dist/index.html` at startup and serves it if present; otherwise it runs
+exactly as before. Every JSON route lives under `/api` so the two never collide.
+
 ### Submitting work
 
 ```bash
-curl -X POST http://localhost:4000/jobs \
+curl -X POST http://localhost:4000/api/jobs \
   -H 'Content-Type: application/json' \
   -d '{"type":"sleep","payload":{"ms":5000}}'
 ```
@@ -102,22 +123,24 @@ curl -X POST http://localhost:4000/jobs \
 
 ### API
 
+All routes are under `/api`; everything else is the dashboard.
+
 | Endpoint | Purpose |
 | --- | --- |
-| `POST /jobs` | Submit work. Returns `202` with the job id |
-| `GET /jobs/:id` | Full record: status, attempts, error, timings |
-| `GET /jobs?status=&limit=` | Recent jobs, newest first |
-| `POST /jobs/:id/replay` | Requeue a dead job. `409` unless it is dead |
-| `GET /workers` | Live workers, heartbeat TTL remaining, and what each is holding |
-| `GET /health` | Redis and Postgres reachability, pending/delayed depth, status tally |
+| `POST /api/jobs` | Submit work. Returns `202` with the job id |
+| `GET /api/jobs/:id` | Full record: status, attempts, error, timings |
+| `GET /api/jobs?status=&limit=` | Recent jobs, newest first |
+| `POST /api/jobs/:id/replay` | Requeue a dead job. `409` unless it is dead |
+| `GET /api/workers` | Live workers, heartbeat TTL remaining, and what each is holding |
+| `GET /api/health` | Redis and Postgres reachability, pending/delayed depth, status tally |
 
-**`Idempotency-Key`.** `POST /jobs` accepts the header, and sending the same key twice returns the
+**`Idempotency-Key`.** `POST /api/jobs` accepts the header, and sending the same key twice returns the
 original job with `200` and `deduplicated: true` rather than creating a second one. It exists because
 a caller whose connection drops before the response has no way to tell a failed submission from a
 successful one it never heard about, and retrying is the right thing for it to do.
 
 ```bash
-curl -X POST http://localhost:4000/jobs -H 'Idempotency-Key: order-4471' \
+curl -X POST http://localhost:4000/api/jobs -H 'Idempotency-Key: order-4471' \
   -H 'Content-Type: application/json' -d '{"type":"sleep","payload":{"ms":10}}'
 ```
 
@@ -239,8 +262,8 @@ Four executions, **one** effect row — a retry must not be counted as a duplica
 could disagree with the row that holds the error and the timings.
 
 ```bash
-curl "http://localhost:4000/jobs?status=dead"          # read the inbox
-curl -X POST "http://localhost:4000/jobs/<id>/replay"  # fix the cause, then replay
+curl "http://localhost:4000/api/jobs?status=dead"          # read the inbox
+curl -X POST "http://localhost:4000/api/jobs/<id>/replay"  # fix the cause, then replay
 ```
 
 A DLQ is an inbox, not a graveyard. Replay resets the attempt counter, because the retries that were
@@ -338,7 +361,7 @@ eight rounds of 40 jobs and ends with nothing lost and nothing duplicated.
 ### Watching it happen
 
 ```bash
-curl http://localhost:4000/workers                                  # who is alive, and holding what
+curl http://localhost:4000/api/workers                              # who is alive, and holding what
 npm run redis:cli -- lrange queueflow:processing:w1 0 -1            # what w1 has right now
 npm run redis:cli -- ttl worker:w1:alive                            # seconds until presumed dead
 ```
@@ -436,8 +459,9 @@ demonstrates it. In summary:
 
 ## Roadmap
 
-Graceful shutdown on `SIGTERM` · error classification so a `400` is not retried · a live dashboard ·
-containerised deployment with CI.
+Dashboard: job detail, workers panel, DLQ with replay, a submit form, and operator login · API keys
+on `POST /api/jobs` · graceful shutdown on `SIGTERM` · error classification so a `400` is not
+retried · containerised deployment with CI.
 
 ---
 
@@ -457,7 +481,7 @@ src/
     retry.ts         backoff policy: exponential, capped, jittered
     heartbeat.ts     the "still alive" key, and its TTL
   db/migrate.ts      applies db/schema.sql
-  api/index.ts       HTTP producer
+  api/index.ts       HTTP producer; serves the dashboard when web/dist exists
   worker/
     index.ts         consumer loop, handoff, leases, lifecycle transitions
     handlers.ts      job type implementations
@@ -474,6 +498,11 @@ test/
   backoff.test.ts      the delay function, in isolation
   crash.test.ts        kill -9 mid-job; the lease, with and without
   chaos.test.ts        random kills under load; nothing lost, nothing duplicated
+web/                   the dashboard — Vite + React, its own package
+  src/
+    api/               one file per API resource; client.ts is the fetch wrapper
+    pages/             one component per route
+    types.ts           the API's JSON shapes as the browser sees them
 ```
 
 ## Scripts
@@ -487,6 +516,8 @@ test/
 | `npm run dev:workers 3` | Run N workers in one terminal, output prefixed per worker |
 | `npm run dev:scheduler` | Scheduler — due retries, dead-worker recovery, orphan sweep |
 | `npm run dev:receiver` | Local webhook receiver on :4001 for testing deliveries |
+| `npm run dev:web` | Dashboard dev server on :5173, proxying `/api` to :4000 |
+| `npm run build:web` | Build the dashboard to `web/dist` for the API to serve |
 | `npm test` | 18 tests against real processes: concurrency, retries, crashes, chaos |
 | `npm run bench` | Throughput sweep across workers × concurrency |
 | `npm run redis:cli` / `redis:monitor` | Inspect Redis |

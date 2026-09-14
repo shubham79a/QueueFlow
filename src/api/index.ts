@@ -1,4 +1,6 @@
 import { randomUUID } from "node:crypto";
+import { existsSync } from "node:fs";
+import { join, resolve } from "node:path";
 import express from "express";
 import {
   KEYS,
@@ -26,6 +28,11 @@ const db = createDb("api", log);
 const app = express();
 app.use(express.json());
 
+// Every JSON route lives on this router, mounted at /api. The prefix exists because the
+// dashboard is served from the same process at `/` — without it, GET /jobs would have to
+// be both the JSON list and the page that shows it.
+const api = express.Router();
+
 const JOB_COLUMNS = `id, type, payload, status, attempts, max_attempts,
                      last_error, idempotency_key, created_at, started_at, completed_at,
                      next_run_at, lease_id`;
@@ -33,7 +40,7 @@ const JOB_COLUMNS = `id, type, payload, status, attempts, max_attempts,
 // POST /jobs — the producer.
 // The handler still does not run the job, wait for it, or ever learn whether it succeeded.
 
-app.post("/jobs", async (req, res) => {
+api.post("/jobs", async (req, res) => {
   const { type, payload } = req.body ?? {};
 
   if (!isJobType(type)) {
@@ -117,7 +124,7 @@ app.post("/jobs", async (req, res) => {
 
 // GET /jobs/:id — the consumer, or anyone else who wants to know what happened to a job.
 
-app.get("/jobs/:id", async (req, res) => {
+api.get("/jobs/:id", async (req, res) => {
   const rows = await query<JobRow>(
     db,
     `SELECT ${JOB_COLUMNS} FROM jobs WHERE id = $1`,
@@ -135,7 +142,7 @@ app.get("/jobs/:id", async (req, res) => {
 // DLQ = Dead Letter Queue. Dead jobs who exhausted their attempts need human intervention to fix the cause of failure.
 // Attempt counter resets with new conditions, because the retries that were exhausted were spent against the old, broken conditions.
 
-app.post("/jobs/:id/replay", async (req, res) => {
+api.post("/jobs/:id/replay", async (req, res) => {
   const { id } = req.params;
   // update is atomic, so no need to check if the job is dead first. If it is not, the update will return 0 rows and we can handle that case.
   // seprate? why not?
@@ -175,7 +182,7 @@ app.post("/jobs/:id/replay", async (req, res) => {
 });
 
 // GET /jobs?status=&limit= — recent jobs, newest first. 
-app.get("/jobs", async (req, res) => {
+api.get("/jobs", async (req, res) => {
   const status = req.query.status as JobStatus | undefined;
   const limit = Math.min(Number(req.query.limit ?? 20), 100);
 
@@ -210,7 +217,7 @@ app.get("/jobs", async (req, res) => {
  * flips to false while the jobs are still listed against it, then the jobs move
  * back to pending and the row disappears.
  */
-app.get("/workers", async (_req, res) => {
+api.get("/workers", async (_req, res) => {
   const ids = new Set<string>();
 
   // Two sources, because they answer different questions. A heartbeat with no
@@ -250,7 +257,7 @@ app.get("/workers", async (_req, res) => {
 // different things: without Redis nothing can be dispatched, and without Postgres nothing can be recorded — and
 // this API refuses to accept work it cannot record.
 
-app.get("/health", async (_req, res) => {
+api.get("/health", async (_req, res) => {
   const health: Record<string, unknown> = { status: "ok" };
 
   try {
@@ -278,6 +285,33 @@ app.get("/health", async (_req, res) => {
 
   return res.status(health.status === "ok" ? 200 : 503).json(health);
 });
+
+// Last handler on the router: an unknown /api/* path is a JSON 404. Without this it
+// would fall through to the dashboard fallback below and come back as HTML.
+api.use((_req, res) => {
+  res.status(404).json({ error: "not found" });
+});
+
+app.use("/api", api);
+
+// The dashboard. `web/` builds to static files; if they exist, this process serves
+// them at `/` — one port, one deployable. If they don't (dev, or a fresh clone with no
+// build yet), skip entirely and the API runs as it always has; Vite serves the UI on
+// its own port and proxies /api here.
+//
+// The final `app.use` is the SPA fallback: a browser reload on /jobs/abc must get
+// index.html, not a 404, so the client-side router can take over. Anything under /api
+// never reaches it — the router's own 404 above catches that first.
+const webDist = resolve(import.meta.dirname, "../../web/dist");
+const webIndex = join(webDist, "index.html");
+
+if (existsSync(webIndex)) {
+  app.use(express.static(webDist));
+  app.use((_req, res) => {
+    res.sendFile(webIndex);
+  });
+  log.info(null, `serving dashboard from ${webDist}`);
+}
 
 app.listen(PORT, () => {
   log.info(null, `listening on http://localhost:${PORT}`);
