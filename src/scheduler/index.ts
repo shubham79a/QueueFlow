@@ -4,42 +4,30 @@ import { createRedis } from "../shared/redis.js";
 import { createDb, query } from "../shared/db.js";
 import { reapDead, sweepOrphans } from "./reaper.js";
 
-/**
- * The scheduler.
- *
- * One job, stated once: PUT JOBS BACK ON THE PENDING LIST. There are three reasons
- * a job needs putting back, and this process is the only thing that knows about
- * any of them:
- *
- *   its backoff elapsed        promoteDue()   — a failed job whose retry is due
- *   its worker stopped talking reapDead()     — a crash, and the job was rescued
- *   it was never queued at all sweepOrphans() — the API died mid-enqueue
- *
- * All three are the same sentence with a different cause, which is why they belong
- * in one process rather than three. A worker's job description stays "run the next
- * job"; everything about work that is not currently moving lives here.
- *
- * A separate process rather than a loop inside each worker, because it is visible:
- * you can watch it, and you can kill it and see retries stop and crashed jobs stay
- * stuck — the honest way to learn that it is a single point of failure (GAP-4.2).
- */
+// The scheduler.
+// One job, stated once: PUT JOBS BACK ON THE PENDING LIST. There are three reasons a job needs putting back,
+// and this process is the only thing that knows about any of them:
+// 1.  its backoff elapsed        promoteDue()   — a failed job whose retry is due
+// 2.  its worker stopped talking reapDead()     — a crash, and the job was rescued
+// 3.  it was never queued at all sweepOrphans() — the API died mid-enqueue
+// - All three are the same sentence with a different cause, which is why they belong
+// in one process rather than three. A worker's job description stays "run the next
+// job"; everything about work that is not currently moving lives here.
+// - A separate process rather than a loop inside each worker, because it is visible:
+// you can watch it, and you can kill it and see retries stop and crashed jobs stay
+// stuck — the honest way to learn that it is a single point of failure. Running two is safe.
+
 const SCHEDULER_ID = process.env.SCHEDULER_ID ?? "s1";
 
-/** Never sleep longer than this, even if nothing is due, so a new job is noticed. */
+// Never sleep longer than this, even if nothing is due, so a new job is noticed.
 const MAX_SLEEP_MS = 1000;
 
-/** Cap on how many jobs are promoted per pass, so one burst cannot monopolise. */
+// Cap on how many jobs are promoted per pass, so one burst cannot monopolise.
 const BATCH = 100;
 
-/**
- * How often to look for dead workers and orphaned rows.
- *
- * Much less often than the retry check, because both are answers to rare events
- * and both cost more to ask: a SCAN of the keyspace and a query against the jobs
- * table, versus one ZRANGE. Recovery latency is dominated by the heartbeat TTL
- * anyway — a job cannot be rescued before its owner has been quiet for TTL
- * seconds, so checking far more often than that buys nothing.
- */
+// How often to look for dead workers and orphaned rows.
+// Much less often than the retry check, because both are answers to rare events and both cost more to ask.
+// Why reaping runs every 5s, not every pass -- rare events, expensive checks, and recovery is bounded by TTL anyway
 const REAP_INTERVAL_MS = Math.max(200, Number(process.env.REAP_INTERVAL_MS ?? 5_000));
 
 const log = createLogger(SCHEDULER_ID);
@@ -48,9 +36,7 @@ const db = createDb(SCHEDULER_ID, log);
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
-/**
- * Promote everything currently due. Returns how many moved.
- */
+// Promote everything currently due. Returns how many moved.
 async function promoteDue(): Promise<number> {
   const now = Date.now();
 
@@ -62,26 +48,22 @@ async function promoteDue(): Promise<number> {
   let promoted = 0;
 
   for (const jobId of due) {
-    /**
-     * ZREM IS THE CLAIM, and it is why several schedulers can run safely.
-     *
-     * Redis executes commands one at a time, so if two schedulers both see this
-     * job as due, exactly one of their ZREMs removes it and returns 1; the other
-     * returns 0 and skips. No lock, no leader election — the same atomicity that
-     * stops two workers taking the same job from the pending list.
-     *
-     * Doing this the obvious way instead — read, then push, then remove — would
-     * let both schedulers push the id, and the job would run twice.
-     */
+
+    // ZREM IS THE CLAIM, and it is why several schedulers can run safely.
+    // -- Redis executes commands one at a time, so if two schedulers both see this
+    // job as due, exactly one of their ZREMs removes it and returns 1; the other
+    // returns 0 and skips. No lock, no leader election — the same atomicity that
+    // stops two workers taking the same job from the pending list.
+    // -- Doing this the obvious way instead — read, then push, then remove — would
+    // let both schedulers push the id, and the job would run twice.
+
     const claimed = await redis.zrem(KEYS.delayed, jobId);
     if (claimed !== 1) continue;
+    // Row first, then the push — the same ordering as everywhere else. A crash
+    // between them leaves a row saying 'queued' with an id that is in neither
+    // Redis structure: an orphan the sweep will find and re-push, rather than a worker
+    // receiving an id whose row still claims to be waiting for a retry.
 
-    /**
-     * Row first, then the push — the same ordering as everywhere else. A crash
-     * between them leaves a row saying 'queued' with an id that is in neither
-     * Redis structure: an orphan a query can find (GAP-2.1), rather than a worker
-     * receiving an id whose row still claims to be waiting for a retry.
-     */
     await query(
       db,
       `UPDATE jobs SET status = 'queued', next_run_at = NULL WHERE id = $1`,
@@ -101,7 +83,7 @@ async function promoteDue(): Promise<number> {
  * How long to wait before looking again.
  *
  * THIS IS THE ONE PLACE IN THE PROJECT WHERE POLLING IS UNAVOIDABLE, and the
- * contrast with the worker is deliberate. BRPOP exists because Redis can tell you
+ * contrast with the worker is deliberate. BLMOVE exists because Redis can tell you
  * the instant a list gains an element. There is no equivalent for "wake me when
  * this score becomes reachable" — time passing is not an event Redis can notify on.
  *
@@ -147,7 +129,7 @@ async function main(): Promise<void> {
   log.info(
     null,
     `scheduler ${SCHEDULER_ID} up, watching ${KEYS.delayed}` +
-      ` and reaping every ${REAP_INTERVAL_MS}ms`,
+    ` and reaping every ${REAP_INTERVAL_MS}ms`,
   );
 
   let nextReapAt = 0;

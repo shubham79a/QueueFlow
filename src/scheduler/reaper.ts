@@ -5,47 +5,30 @@ import { query } from "../shared/db.js";
 import type { Logger } from "../shared/log.js";
 import { isUuid } from "../shared/types.js";
 
-/**
- * The reaper: return the jobs of a worker that is no longer alive.
- *
- * This is the half of the system that finally makes a crash survivable. BLMOVE
- * left the job id sitting in `queueflow:processing:<workerId>` when the process
- * died; the heartbeat made "is that worker still alive?" a question Redis can
- * answer. This puts the two together and moves the job back to `pending`.
- *
- * IT WILL SOMETIMES BE WRONG, AND THAT IS NOT FIXABLE. A missing heartbeat means
- * "this worker has not spoken recently", which is not the same as "this worker is
- * dead" — a long garbage-collection pause, a stalled network, an overloaded
- * machine all look identical from here. Widening the TTL makes the mistake rarer
- * and the recovery slower; it never makes the mistake impossible, because over a
- * network there is no way to distinguish a process that has stopped from one that
- * is merely quiet.
- *
- * So the design accepts it: this loop will occasionally take a job away from a
- * worker that is still running it, and the job will run twice. Making that
- * harmless is the lease, in the worker.
- */
+// The reaper: return the jobs of a worker that is no longer alive.
+// This helps the system crash survivable. BLMOVE move job from pending to the `queueflow:processing:<workerId>`.
+// when process died, the heartbeat made "is that worker still alive?". If alive fine else push job back to pending.
+// But heartbeat not always give you correct alive info, sometime wrong too. this is not fixable.
+// Missing heartbeat worker has not spoken recently, which doesn't means worker is dead.
+// Using TTL help to avoid those error still not 100% correct.
 
-/**
- * How old a `queued` row must be before the sweep treats it as lost rather than
- * as merely waiting.
- *
- * MUST COMFORTABLY EXCEED NORMAL QUEUE WAIT. A backlog where jobs legitimately sit
- * for two minutes, with this set to sixty seconds, would have the sweep re-pushing
- * ids that are already in the queue.
- */
+// So by design: w1 gets marked dead while j1 is still running, the reaper pushes j1 back to
+// pending, w2 picks it up and runs it too. The job runs twice — that part we accept. What the
+// lease_id prevents is both of them RECORDING it: only the latest claim can write.
+
+// How old a `queued` row must be before the sweep treats it as lost rather than as merely waiting.
+
+// MUST COMFORTABLY EXCEED NORMAL QUEUE WAIT. A backlog where jobs legitimately sit for two minutes, 
+// with this set to sixty seconds, would have the sweep re-pushing ids that are already in the queue.
+
 const ORPHAN_AGE_S = Math.max(5, Number(process.env.ORPHAN_AGE_S ?? 60));
 
-/** Cap per pass, so one catastrophe cannot monopolise the loop. */
+// Cap per pass, so one catastrophe cannot monopolise the loop.
 const BATCH = 100;
 
-/**
- * Every job id Redis is currently holding, across `pending` and every worker's
- * processing list.
- *
- * Reading whole lists is not free, which is why the orphan sweep below builds this
- * only when it has already found candidate rows — on a healthy system, never.
- */
+// Every job id Redis is currently holding, across `pending` and every worker's processing list.
+// Reading whole lists is not free, which is why the orphan sweep below builds this
+// only when it has already found candidate rows — on a healthy system, never.
 async function idsHeldByRedis(redis: Redis): Promise<Set<string>> {
   const held = new Set(await redis.lrange(KEYS.pending, 0, -1));
 
@@ -56,9 +39,7 @@ async function idsHeldByRedis(redis: Redis): Promise<Set<string>> {
   return held;
 }
 
-/**
- * Return everything one dead worker was holding. Returns how many jobs moved.
- */
+// Return everything one dead worker was holding. Returns how many jobs moved.
 async function reapWorker(
   redis: Redis,
   db: Pool,
@@ -68,9 +49,8 @@ async function reapWorker(
 ): Promise<number> {
   let reaped = 0;
 
-  // Every branch below either LREMs or LMOVEs, so the list shrinks by one on each
-  // pass and this always terminates — including when a second scheduler is racing
-  // for the same entries.
+  // Every branch below either LREMs or LMOVEs, so the list shrinks by one on each pass and this 
+  // always terminates — including when a second scheduler is racing for the same entries.
   while (true) {
     const jobId = await redis.lindex(key, -1);
     if (jobId === null) break;
@@ -93,43 +73,24 @@ async function reapWorker(
       continue;
     }
 
-    /**
-     * ALREADY ACCOUNTED FOR. Two different cases, both meaning "somebody else has
-     * this job now, and the id in this list is just litter":
-     *
-     *   succeeded / dead / failed  the worker recorded the outcome and then died
-     *                              before it could LREM the id — the deliberately
-     *                              chosen crash window in the worker's release
-     *                              protocol. Requeueing would re-run a job that
-     *                              has already finished.
-     *
-     *   retrying                   the worker recorded the failure and parked the
-     *                              job in the delayed sorted set, then died before
-     *                              releasing the id. The scheduler will promote it
-     *                              when its backoff elapses; pushing it to pending
-     *                              here would run it early AND leave a stale entry
-     *                              in the delayed set to run it a second time.
-     *
-     * EVERY OTHER STATUS IS RESCUED, including 'queued' — which is not a paradox.
-     * BLMOVE puts the id in this list a moment BEFORE the worker claims the row,
-     * so a process that died inside that window leaves a 'queued' row with its id
-     * held by a worker that no longer exists. Nothing else will ever look at it:
-     * the id is not in pending, and the orphan sweep skips anything Redis is
-     * holding. Treating that as litter loses the job outright.
-     */
+    // ALREADY ACCOUNTED FOR. Two different cases, both meaning "somebody else has
+    // this job now, and the id in this list is just litter":
+    // 1.succeeded / dead / failed  the worker recorded the outcome and then died before LREM. Requeueing
+    //                              would re-run a job that has already finished.
+    // 2.retrying                   the worker wrote the failure and ZADDed the job into the delayed set, 
+    //                              then died before the LREM. The scheduler will promote it when it's due. 
+    //                              Pushing it to pending here would make it run early, and then again when the ZSET fires.
+    // 3.running is the normal case — w1 claimed it, was working, died. queued is the tiny window where BLMOVE put the id in 
+    // the list but the claim UPDATE hadn't landed yet. Both need rescuing.
+
     if (["succeeded", "dead", "failed", "retrying"].includes(row.status)) {
       await redis.lrem(key, -1, jobId);
       log.info(jobId, `released from dead worker ${workerId} — already ${row.status}`);
       continue;
     }
 
-    /**
-     * THE POISON-PILL CAP. A job that kills whatever runs it — a payload that
-     * triggers an out-of-memory, say — would otherwise be rescued forever, taking
-     * down one worker after another. attempts was incremented when the job was
-     * claimed, precisely so a death still counts as an attempt, so the ordinary
-     * retry budget applies here with no extra bookkeeping.
-     */
+    // The poison-pill cap. attempts was incremented at claim time, so this crash already counted. 
+    // If it's used up its budget → mark dead in Postgres, remove the id. Don't push it back — a job that kills every worker it lands on must stop somewhere.
     if (row.attempts >= row.max_attempts) {
       await query(
         db,
@@ -148,32 +109,12 @@ async function reapWorker(
       continue;
     }
 
-    /**
-     * Row first, then the move — the ordering this project uses everywhere.
-     *
-     * The row still says 'running' from the claim the dead worker made. Put it back
-     * to 'queued' BEFORE the id becomes takeable, so no worker can ever be handed
-     * an id whose row still claims somebody else is on it. A crash between the two
-     * statements leaves a 'queued' row with the id still in this processing list —
-     * which the next pass reaps again, harmlessly.
-     *
-     * started_at is cleared because the job returns to waiting and that column
-     * measures queue wait; leaving it would bill the crash to execution time.
-     * attempts is NOT reset — that attempt was genuinely spent.
-     *
-     * lease_id IS DELIBERATELY LEFT ALONE, and it is worth saying why, because
-     * clearing it looks tidier and is worse. Suppose this worker was not dead
-     * after all, just quiet, and it finishes a moment from now. Leaving the lease
-     * standing lets it record the result it legitimately produced — and then the
-     * next worker to pick this id up finds the row already 'succeeded', declines
-     * the claim, and drops it. Nothing is run twice and no work is thrown away.
-     * Clearing the lease would fence out a worker that was about to finish, purely
-     * for the sake of a tidier column. The next real claim reissues it anyway.
-     *
-     * LMOVE tail-to-tail: onto the end of `pending` that BLMOVE reads from, so a
-     * rescued job is served NEXT. It has been waiting longer than anything else in
-     * the queue, and it has already been through a crash.
-     */
+    // Row first, then the move. If the id hit pending while the row still said 'running',
+    // the next worker's claim (WHERE status IN queued/retrying) would fail and drop the job.
+    // started_at cleared — it's back to waiting. attempts kept — the crash was a real attempt.
+    // lease_id left alone on purpose: if w1 was slow, not dead, and finishes first, it can still
+    // record its result; the next claim reissues the lease anyway.
+    // LMOVE tail-to-tail puts the rescued job at the front of pending — it's waited longest.
     await query(
       db,
       `UPDATE jobs SET status = 'queued', started_at = NULL WHERE id = $1`,
@@ -191,9 +132,8 @@ async function reapWorker(
   return reaped;
 }
 
-/**
- * One reaping pass over every worker's processing list.
- */
+// One reaping pass over every worker's processing list.
+// find the dead worker and had over to the reapWorker. which worker is dead?
 export async function reapDead(redis: Redis, db: Pool, log: Logger): Promise<number> {
   let reaped = 0;
 
@@ -201,32 +141,18 @@ export async function reapDead(redis: Redis, db: Pool, log: Logger): Promise<num
     const workerId = workerIdFromProcessingKey(key);
     if (workerId === null) continue;
 
-    // The entire failure detector, in one command. A living worker keeps rewriting
-    // this key; a dead one stops and Redis removes it.
+    // the worker who keep sending the heartbeat is alive. If not means dead
     if (await redis.exists(KEYS.alive(workerId))) continue;
 
-    // An empty list belonging to a departed worker is just a name Redis has
-    // already forgotten — LLEN 0 means the key does not exist. Nothing to do.
+    // dead worker found
     reaped += await reapWorker(redis, db, log, key, workerId);
   }
 
   return reaped;
 }
 
-/**
- * The orphan sweep — the other way a job goes missing, and the older one.
- *
- * The API inserts the row and then pushes the id, and nothing can make those two
- * writes atomic because they are in different stores. A crash in between leaves a
- * row that says 'queued' and an id that was never queued anywhere. The job is not
- * lost — that was the entire point of writing the row first — but nothing was ever
- * going to notice it, either. This is the something that notices.
- *
- * IT WAS LEFT OPEN ON PURPOSE UNTIL NOW. Re-pushing an id carries the risk that
- * the id is already in the queue and the job runs twice, and until a duplicate
- * execution was survivable that risk was worse than the leak. The lease is what
- * changed the arithmetic.
- */
+// Different problem: the API wrote a row but died before the LPUSH. The row says queued,
+// but no id is in Redis anywhere. Nothing will ever pick it up.
 export async function sweepOrphans(redis: Redis, db: Pool, log: Logger): Promise<number> {
   const candidates = await query<{ id: string }>(
     db,
@@ -238,8 +164,7 @@ export async function sweepOrphans(redis: Redis, db: Pool, log: Logger): Promise
     [ORPHAN_AGE_S],
   );
 
-  // The overwhelmingly common case, and the reason the expensive check below is
-  // guarded rather than run every pass.
+  // The overwhelmingly common case, and the reason the expensive check below is guarded rather than run every pass.
   if (candidates.length === 0) return 0;
 
   const held = await idsHeldByRedis(redis);

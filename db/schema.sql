@@ -5,13 +5,6 @@
 -- destroying the database.
 
 -- ---------------------------------------------------------------------------
--- jobs — the permanent record.
---
--- This is the source of truth. Redis holds job ids and nothing else; if Redis
--- were wiped right now, every job that ever ran would still be here with its
--- payload, its outcome and its timings. That asymmetry is the point of Phase 2:
--- Redis is a transport, this is the record.
--- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS jobs (
   id               UUID PRIMARY KEY,
   type             TEXT NOT NULL,
@@ -20,19 +13,20 @@ CREATE TABLE IF NOT EXISTS jobs (
   -- The state machine, enforced by the database rather than by convention.
   -- A bug that tries to write 'suceeded' fails loudly at the INSERT instead of
   -- quietly creating a state nothing queries for.
-  --   queued    accepted, waiting for a worker
-  --   running   a worker claimed it
-  --   succeeded handler returned
-  --   failed    handler threw (terminal for now; retries are Phase 4)
-  --   dead      exhausted its retries (unused until Phase 4)
+  --   queued     accepted, in Redis, waiting for a worker
+  --   running    a worker has claimed it
+  --   retrying   failed, parked in the delayed set until its backoff elapses
+  --   succeeded  handler returned
+  --   failed     reserved for a permanent, non-retryable failure — nothing writes it yet
+  --   dead       out of attempts; the dead-letter queue is WHERE status = 'dead'
+  --
+  -- The CHECK below is the original five; 'retrying' is added by an ALTER further
+  -- down, which replaces this constraint with the full six-state version.
   status           TEXT NOT NULL
                      CHECK (status IN ('queued','running','succeeded','failed','dead')),
 
   attempts         INT  NOT NULL DEFAULT 0,
 
-  -- Unused until Phase 4 (retries) and Phase 5 (idempotency). Declared now
-  -- because they are part of the schema this system was specified with, and
-  -- adding columns to a table with history in it is churn for no gain.
   max_attempts     INT  NOT NULL DEFAULT 5,
   last_error       TEXT,
   idempotency_key  TEXT UNIQUE,
@@ -62,10 +56,6 @@ CREATE INDEX IF NOT EXISTS jobs_status_created_idx ON jobs (status, created_at);
 --   -- did anything claim success without running?
 --   SELECT id FROM jobs WHERE status = 'succeeded'
 --     AND id NOT IN (SELECT job_id FROM job_effects);
---
--- Built now, before it is needed. In Phase 5 the whole argument for idempotency
--- rests on being able to show a job that ran twice, and you cannot show that
--- with logs.
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS job_effects (
   job_id     UUID NOT NULL REFERENCES jobs(id),
@@ -89,7 +79,7 @@ CREATE INDEX IF NOT EXISTS job_effects_job_id_idx ON job_effects (job_id);
 -- sitting there and when it will move.
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS next_run_at TIMESTAMPTZ;
 
--- 'retrying' is new: the job failed, has attempts left, and is parked in the
+-- 'retrying' means: the job failed, has attempts left, and is parked in the
 -- delayed set waiting for its backoff to elapse.
 --
 -- It gets its own status rather than reusing 'queued' so that the two kinds of
