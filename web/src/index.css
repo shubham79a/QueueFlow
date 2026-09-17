@@ -58,6 +58,38 @@ main {
   border-bottom-color: var(--accent);
 }
 
+/* ---- health strip (in the header) ------------------------------------------- */
+
+.health {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  font-size: 13px;
+}
+
+.dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  margin-right: 4px;
+  vertical-align: middle;
+}
+
+.dot-ok  { background: #16a34a; }
+.dot-bad { background: #dc2626; }
+
+.tally {
+  display: flex;
+  gap: 4px;
+}
+
+.tally .badge {
+  font-size: 11px;
+  padding: 1px 6px;
+}
+
 /* ---- page chrome ----------------------------------------------------------- */
 
 h1 {
@@ -92,6 +124,77 @@ h1 {
 select {
   font: inherit;
   padding: 3px 6px;
+}
+
+main a {
+  color: var(--accent);
+  text-decoration: none;
+}
+
+main a:hover {
+  text-decoration: underline;
+}
+
+h2 {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin: 24px 0 8px;
+}
+
+code {
+  font-family: var(--mono);
+  font-size: 12px;
+  background: #eee;
+  padding: 1px 4px;
+  border-radius: 3px;
+}
+
+/* ---- job detail ------------------------------------------------------------- */
+
+.kv {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 6px 20px;
+  margin: 0;
+  background: #fff;
+  border: 1px solid var(--line);
+  padding: 14px 16px;
+}
+
+.kv dt {
+  color: var(--muted);
+}
+
+.kv dd {
+  margin: 0;
+}
+
+pre.payload,
+pre.error-box {
+  background: #fff;
+  border: 1px solid var(--line);
+  padding: 12px 14px;
+  margin: 0;
+  font-family: var(--mono);
+  font-size: 13px;
+  overflow-x: auto;
+}
+
+pre.error-box {
+  border-color: #fecaca;
+  background: #fef2f2;
+  color: #991b1b;
+  white-space: pre-wrap;
+}
+
+/* ---- workers ---------------------------------------------------------------- */
+/* A dead worker still holding jobs — the crash, before the reaper gets to it. */
+
+tr.row-warn td {
+  background: #fef2f2;
 }
 
 /* ---- table ----------------------------------------------------------------- */

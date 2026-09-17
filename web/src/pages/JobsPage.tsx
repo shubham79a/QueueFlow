@@ -1,7 +1,10 @@
 import { useState } from 'react'
+import { Link } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import { listJobs } from '../api/jobs.ts'
 import { JOB_STATUSES, type JobStatus } from '../types.ts'
+import { duration, shortId, timeAgo } from '../format.ts'
+import StatusBadge from '../components/StatusBadge.tsx'
 
 // How often the table asks the API for fresh rows. This one number is the whole
 // "live" feature — TanStack Query refetches on the interval and React re-renders
@@ -19,8 +22,6 @@ export default function JobsPage() {
     queryFn: () => listJobs(status),
     refetchInterval: REFRESH_MS,
   })
-
-  console.log("jobs",jobs)
 
   return (
     <section>
@@ -64,10 +65,12 @@ export default function JobsPage() {
           <tbody>
             {jobs.data.map((job) => (
               <tr key={job.id}>
-                <td className="mono">{shortId(job.id)}</td>
+                <td className="mono">
+                  <Link to={`/jobs/${job.id}`}>{shortId(job.id)}</Link>
+                </td>
                 <td>{job.type}</td>
                 <td>
-                  <span className={`badge badge-${job.status}`}>{job.status}</span>
+                  <StatusBadge status={job.status} />
                 </td>
                 <td>
                   {job.attempts}/{job.maxAttempts}
@@ -82,25 +85,4 @@ export default function JobsPage() {
       )}
     </section>
   )
-}
-
-// Same shape the worker logs use, so an id on screen matches the id in a terminal.
-function shortId(id: string) {
-  return `job_${id.slice(0, 8)}`
-}
-
-function timeAgo(iso: string) {
-  const s = Math.round((Date.now() - new Date(iso).getTime()) / 1000)
-  if (s < 60) return `${s}s ago`
-  if (s < 3600) return `${Math.round(s / 60)}m ago`
-  return `${Math.round(s / 3600)}h ago`
-}
-
-// The two columns the schema comment calls out: created→started is how long the
-// queue made the job wait (measures us); started→completed is how long the work
-// took (measures the handler). Blank until the later timestamp exists.
-function duration(from: string | null, to: string | null) {
-  if (!from || !to) return ''
-  const ms = new Date(to).getTime() - new Date(from).getTime()
-  return ms < 1000 ? `${ms}ms` : `${(ms / 1000).toFixed(1)}s`
 }

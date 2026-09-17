@@ -23,8 +23,8 @@ app.use(express.json());
  *
  * This is the second half of the correctness story. job_effects records what the
  * WORKER believes happened; this records what the outside world actually
- * received. When those two disagree, the disagreement is the bug — and in Phase 5
- * this counter is what will show a webhook being delivered twice.
+ * received. When those two disagree, the disagreement is the bug — and this
+ * counter is what shows a webhook being delivered twice.
  */
 const deliveries = new Map<string, number>();
 
@@ -140,8 +140,7 @@ app.post("/hook/slow", (req, res) => {
  * Fails the first N deliveries of a given job, then succeeds.
  *
  * This is the shape of a real transient failure — a service that was restarting
- * and is now fine. It is unreachable today, because a failed job is never retried.
- * In Phase 4 it becomes the demonstration: watch attempts climb 1, 2, 3 with
+ * and is now fine. It is the retry demonstration: watch attempts climb 1, 2, 3 with
  * widening gaps, and then succeed.
  */
 app.post("/hook/flaky/:failures", (req, res) => {

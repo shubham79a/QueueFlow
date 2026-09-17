@@ -1,7 +1,10 @@
 import { NavLink, Route, Routes } from 'react-router-dom'
 import JobsPage from './pages/JobsPage.tsx'
+import JobDetailPage from './pages/JobDetailPage.tsx'
+import WorkersPage from './pages/WorkersPage.tsx'
+import HealthStrip from './components/HealthStrip.tsx'
 
-// Layout + routes. Workers and DLQ are placeholders until their features land.
+// Layout + routes. DLQ is a placeholder until its feature lands.
 export default function App() {
   return (
     <>
@@ -14,12 +17,14 @@ export default function App() {
           <NavLink to="/workers">Workers</NavLink>
           <NavLink to="/dlq">DLQ</NavLink>
         </nav>
+        <HealthStrip />
       </header>
 
       <main>
         <Routes>
           <Route path="/" element={<JobsPage />} />
-          <Route path="/workers" element={<Placeholder name="Workers" />} />
+          <Route path="/jobs/:id" element={<JobDetailPage />} />
+          <Route path="/workers" element={<WorkersPage />} />
           <Route path="/dlq" element={<Placeholder name="Dead-letter queue" />} />
           <Route path="*" element={<p className="muted">Nothing here.</p>} />
         </Routes>
@@ -29,9 +34,5 @@ export default function App() {
 }
 
 function Placeholder({ name }: { name: string }) {
-  return (
-    <p className="muted">
-      {name} — coming next.
-    </p>
-  )
+  return <p className="muted">{name} — coming next.</p>
 }

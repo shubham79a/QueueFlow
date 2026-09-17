@@ -13,8 +13,8 @@ import { dirname, resolve } from "node:path";
  * is no one-liner for starting a second worker here.
  *
  * The real reason is that starting and killing real worker processes is exactly
- * what the tests need — the concurrency proof spawns three, and the crash tests in
- * Phase 5 will spawn several and SIGKILL one mid-job. Killing a worker is not
+ * what the tests need — the concurrency proof spawns three, and the crash tests
+ * spawn several and SIGKILL one mid-job. Killing a worker is not
  * something that can be simulated in-process: the whole point is that no cleanup
  * code runs.
  */
@@ -60,7 +60,7 @@ process.stderr.write(`[dev] started ${count} workers, concurrency ${concurrency}
 
 /**
  * Forward Ctrl+C to the children. Without this the parent exits and leaves N
- * orphaned worker processes still holding BRPOP connections — which then quietly
+ * orphaned worker processes still holding BLMOVE connections — which then quietly
  * compete for jobs with whatever you start next, and are a genuine nuisance to
  * find afterwards.
  */

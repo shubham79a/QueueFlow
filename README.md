@@ -6,7 +6,8 @@ implemented here rather than delegated, so the policy decisions stay explicit an
 
 An HTTP API accepts work and returns immediately. Separate worker processes consume and execute it.
 Redis carries job ids between them; Postgres holds the payloads, outcomes and timings. A job survives
-the death of the process running it: `kill -9` a worker mid-job and the job comes back on its own.
+the death of the process running it: `kill -9` a worker mid-job and the job comes back on its own —
+and a dashboard, served by the API, lets you watch that happen.
 
 ---
 
@@ -88,8 +89,16 @@ come back — which is worth seeing once, deliberately.
 
 ### Dashboard
 
-A React app in [web/](web/) that shows jobs moving through the system, refreshing every two
-seconds. In development it runs on its own port and proxies API calls through:
+A React app in [web/](web/) that shows the system as it runs. Read-only, no login:
+
+| Page | Shows |
+| --- | --- |
+| **Jobs** | recent jobs with a status filter — queue wait and run time per row, refreshing every 2 s |
+| **Job detail** | one job: payload, attempts, error, all three timestamps, the next retry if it is backing off |
+| **Workers** | every worker from its heartbeat key — alive or gone, TTL counting down, what it is holding. Kill a worker mid-job and watch its row turn red, then empty as the reaper takes over |
+| **Health strip** | in the header: Redis and Postgres up or down, queue depth, jobs by status |
+
+In development it runs on its own port and proxies API calls through:
 
 ```bash
 cd web && npm install     # one time
