@@ -19,6 +19,7 @@
     "bench": "tsx --env-file=.env src/dev/bench.ts",
     "db:migrate": "tsx --env-file=.env src/db/migrate.ts",
     "db:psql": "docker compose exec postgres psql -U queueflow -d queueflow",
+    "key:new": "node -e \"console.log('qf_' + require('crypto').randomBytes(24).toString('base64url'))\"",
     "typecheck": "tsc --noEmit",
     "build": "tsc -p tsconfig.build.json && npm run build:web",
     "build:web": "npm --prefix web run build",

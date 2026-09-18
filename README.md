@@ -120,6 +120,7 @@ exactly as before. Every JSON route lives under `/api` so the two never collide.
 
 ```bash
 curl -X POST http://localhost:4000/api/jobs \
+  -H 'Authorization: Bearer <your key>' \
   -H 'Content-Type: application/json' \
   -d '{"type":"sleep","payload":{"ms":5000}}'
 ```
@@ -134,14 +135,29 @@ curl -X POST http://localhost:4000/api/jobs \
 
 All routes are under `/api`; everything else is the dashboard.
 
-| Endpoint | Purpose |
-| --- | --- |
-| `POST /api/jobs` | Submit work. Returns `202` with the job id |
-| `GET /api/jobs/:id` | Full record: status, attempts, error, timings |
-| `GET /api/jobs?status=&limit=` | Recent jobs, newest first |
-| `POST /api/jobs/:id/replay` | Requeue a dead job. `409` unless it is dead |
-| `GET /api/workers` | Live workers, heartbeat TTL remaining, and what each is holding |
-| `GET /api/health` | Redis and Postgres reachability, pending/delayed depth, status tally |
+| Endpoint | Auth | Purpose |
+| --- | --- | --- |
+| `POST /api/jobs` | **key** | Submit work. Returns `202` with the job id |
+| `POST /api/jobs/:id/replay` | **key** | Requeue a dead job. `409` unless it is dead |
+| `GET /api/jobs/:id` | open | Full record: status, attempts, error, timings |
+| `GET /api/jobs?status=&limit=` | open | Recent jobs, newest first |
+| `GET /api/workers` | open | Live workers, heartbeat TTL remaining, and what each is holding |
+| `GET /api/health` | open | Redis and Postgres reachability, pending/delayed depth, status tally |
+
+**Authentication.** Writing needs a key; reading does not, so the dashboard is viewable by anyone.
+Generate a key and put it in `.env`:
+
+```bash
+npm run key:new          # prints qf_…
+# API_KEYS=qf_…          in .env, comma-separated for more than one
+```
+
+Callers send it as `Authorization: Bearer <key>`. A missing or unknown key gets `401`. Keys are
+compared in constant time and never logged.
+
+**With `API_KEYS` empty the write routes are open** — so a fresh clone runs with no setup — and the
+API says so loudly at startup. Set a key before deploying anywhere reachable: `deliver_webhook`
+means an open `POST /api/jobs` lets a stranger make your server send requests to any URL.
 
 **`Idempotency-Key`.** `POST /api/jobs` accepts the header, and sending the same key twice returns the
 original job with `200` and `deduplicated: true` rather than creating a second one. It exists because
@@ -150,6 +166,7 @@ successful one it never heard about, and retrying is the right thing for it to d
 
 ```bash
 curl -X POST http://localhost:4000/api/jobs -H 'Idempotency-Key: order-4471' \
+  -H 'Authorization: Bearer <your key>' \
   -H 'Content-Type: application/json' -d '{"type":"sleep","payload":{"ms":10}}'
 ```
 
@@ -272,7 +289,8 @@ could disagree with the row that holds the error and the timings.
 
 ```bash
 curl "http://localhost:4000/api/jobs?status=dead"          # read the inbox
-curl -X POST "http://localhost:4000/api/jobs/<id>/replay"  # fix the cause, then replay
+curl -X POST "http://localhost:4000/api/jobs/<id>/replay" \
+  -H 'Authorization: Bearer <your key>'                    # fix the cause, then replay
 ```
 
 A DLQ is an inbox, not a graveyard. Replay resets the attempt counter, because the retries that were
@@ -465,12 +483,14 @@ demonstrates it. In summary:
 - **No ordering guarantee** once concurrency is above 1; jobs start FIFO but finish in any order.
 - **No rate limiting toward downstream services**, and one shared slot pool for all job types.
 - **Idempotency keys never expire** — real implementations scope them to a window.
+- **API keys live in an env var**, not a table: no per-client naming, no revocation, no last-used
+  timestamp, no expiry, and no rate limiting. Right size for a couple of machine clients; fifty
+  would want an `api_keys` table with hashed values.
 
 ## Roadmap
 
-Dashboard: job detail, workers panel, DLQ with replay, a submit form, and operator login · API keys
-on `POST /api/jobs` · graceful shutdown on `SIGTERM` · error classification so a `400` is not
-retried · containerised deployment with CI.
+Dashboard: DLQ with replay, a submit form, and operator login · graceful shutdown on `SIGTERM` ·
+error classification so a `400` is not retried · containerised deployment with CI.
 
 ---
 
@@ -521,6 +541,7 @@ web/                   the dashboard — Vite + React, its own package
 | `npm run up` / `down` | Start / remove Redis and Postgres |
 | `npm run db:migrate` | Apply the schema |
 | `npm run db:psql` | psql shell |
+| `npm run key:new` | Print a fresh API key to paste into `.env` |
 | `npm run dev:api` / `dev:worker` | Run with watch-reload |
 | `npm run dev:workers 3` | Run N workers in one terminal, output prefixed per worker |
 | `npm run dev:scheduler` | Scheduler — due retries, dead-worker recovery, orphan sweep |

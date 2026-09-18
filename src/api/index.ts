@@ -11,6 +11,7 @@ import {
 import { createLogger } from "../shared/log.js";
 import { createRedis } from "../shared/redis.js";
 import { createDb, query } from "../shared/db.js";
+import { AUTH_DISABLED, requireWrite } from "./auth.js";
 import {
   isJobType,
   rowToJob,
@@ -40,7 +41,7 @@ const JOB_COLUMNS = `id, type, payload, status, attempts, max_attempts,
 // POST /jobs — the producer.
 // The handler still does not run the job, wait for it, or ever learn whether it succeeded.
 
-api.post("/jobs", async (req, res) => {
+api.post("/jobs", requireWrite, async (req, res) => {
   const { type, payload } = req.body ?? {};
 
   if (!isJobType(type)) {
@@ -142,7 +143,9 @@ api.get("/jobs/:id", async (req, res) => {
 // DLQ = Dead Letter Queue. Dead jobs who exhausted their attempts need human intervention to fix the cause of failure.
 // Attempt counter resets with new conditions, because the retries that were exhausted were spent against the old, broken conditions.
 
-api.post("/jobs/:id/replay", async (req, res) => {
+// The <{ id: string }> is not decoration: with a middleware in the chain, Express's
+// overloads stop inferring the route's params and `id` widens to string | string[].
+api.post<{ id: string }>("/jobs/:id/replay", requireWrite, async (req, res) => {
   const { id } = req.params;
   // update is atomic, so no need to check if the job is dead first. If it is not, the update will return 0 rows and we can handle that case.
   // seprate? why not?
@@ -315,4 +318,14 @@ if (existsSync(webIndex)) {
 
 app.listen(PORT, () => {
   log.info(null, `listening on http://localhost:${PORT}`);
+
+  // Open write routes are fine locally and wrong anywhere else. Say so rather than
+  // letting a deploy be quietly unauthenticated.
+  if (AUTH_DISABLED) {
+    log.error(
+      null,
+      "API_KEYS is not set — job submission and replay are UNAUTHENTICATED." +
+        " Generate one with `npm run key:new` before deploying.",
+    );
+  }
 });
