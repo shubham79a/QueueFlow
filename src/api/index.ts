@@ -11,7 +11,20 @@ import {
 import { createLogger } from "../shared/log.js";
 import { createRedis } from "../shared/redis.js";
 import { createDb, query } from "../shared/db.js";
-import { AUTH_DISABLED, requireWrite } from "./auth.js";
+import {
+  AUTH_DISABLED,
+  KEYS_CONFIGURED,
+  LOGIN_ENABLED,
+  SESSION_SECRET_SET,
+  clearFailures,
+  clearSessionCookie,
+  hasSession,
+  isCorrectPassword,
+  isThrottled,
+  recordFailure,
+  requireWrite,
+  setSessionCookie,
+} from "./auth.js";
 import {
   isJobType,
   rowToJob,
@@ -289,6 +302,48 @@ api.get("/health", async (_req, res) => {
   return res.status(health.status === "ok" ? 200 : 503).json(health);
 });
 
+// --------------------------------------------------------------------------
+// Operator login.
+//
+// The dashboard stays fully readable signed out; this only unlocks the actions that
+// write. A password rather than a key because a key pasted into a browser ends up
+// readable by anyone with devtools — see src/api/auth.ts.
+// --------------------------------------------------------------------------
+
+api.post("/auth/login", (req, res) => {
+  const ip = req.ip ?? "unknown";
+
+  if (isThrottled(ip)) {
+    return res.status(429).json({ error: "too many attempts — wait 15 minutes" });
+  }
+
+  const { password } = (req.body ?? {}) as { password?: unknown };
+
+  if (typeof password !== "string" || !isCorrectPassword(password)) {
+    // Counted before answering, so a wrong guess costs an attempt whether or not
+    // login is even configured.
+    recordFailure(ip);
+    log.error(null, `failed login attempt from ${ip}`);
+    return res.status(401).json({ error: "wrong password" });
+  }
+
+  clearFailures(ip);
+  setSessionCookie(req, res);
+  log.info(null, `operator signed in from ${ip}`);
+  return res.json({ ok: true });
+});
+
+api.post("/auth/logout", (_req, res) => {
+  clearSessionCookie(res);
+  return res.json({ ok: true });
+});
+
+// How the dashboard decides what to render: whether to show Sign in at all, and
+// whether the actions are available.
+api.get("/auth/me", (req, res) => {
+  return res.json({ authenticated: hasSession(req), loginEnabled: LOGIN_ENABLED });
+});
+
 // Last handler on the router: an unknown /api/* path is a JSON 404. Without this it
 // would fall through to the dashboard fallback below and come back as HTML.
 api.use((_req, res) => {
@@ -324,8 +379,24 @@ app.listen(PORT, () => {
   if (AUTH_DISABLED) {
     log.error(
       null,
-      "API_KEYS is not set — job submission and replay are UNAUTHENTICATED." +
-        " Generate one with `npm run key:new` before deploying.",
+      "neither API_KEYS nor ADMIN_PASSWORD is set — job submission and replay are" +
+        " UNAUTHENTICATED. Generate a value with `npm run key:new` before deploying.",
+    );
+  } else {
+    log.info(
+      null,
+      `write access: ${KEYS_CONFIGURED ? "API key" : "no key"}` +
+        ` / ${LOGIN_ENABLED ? "operator login" : "no login"}`,
+    );
+  }
+
+  // Without a fixed secret the signing key is regenerated on every boot, so every
+  // session dies on restart and two API processes reject each other's cookies.
+  if (LOGIN_ENABLED && !SESSION_SECRET_SET) {
+    log.error(
+      null,
+      "SESSION_SECRET is not set — logins will not survive a restart." +
+        " Generate one with `npm run key:new`.",
     );
   }
 });

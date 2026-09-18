@@ -98,6 +98,9 @@ A React app in [web/](web/) that shows the system as it runs. Read-only, no logi
 | **Workers** | every worker from its heartbeat key — alive or gone, TTL counting down, what it is holding. Kill a worker mid-job and watch its row turn red, then empty as the reaper takes over |
 | **Health strip** | in the header: Redis and Postgres up or down, queue depth, jobs by status |
 
+Signing in with the operator password unlocks the actions that write — Replay today, the submit
+form next. Everything above stays readable signed out.
+
 In development it runs on its own port and proxies API calls through:
 
 ```bash
@@ -137,27 +140,42 @@ All routes are under `/api`; everything else is the dashboard.
 
 | Endpoint | Auth | Purpose |
 | --- | --- | --- |
-| `POST /api/jobs` | **key** | Submit work. Returns `202` with the job id |
-| `POST /api/jobs/:id/replay` | **key** | Requeue a dead job. `409` unless it is dead |
+| `POST /api/jobs` | **write** | Submit work. Returns `202` with the job id |
+| `POST /api/jobs/:id/replay` | **write** | Requeue a dead job. `409` unless it is dead |
 | `GET /api/jobs/:id` | open | Full record: status, attempts, error, timings |
 | `GET /api/jobs?status=&limit=` | open | Recent jobs, newest first |
 | `GET /api/workers` | open | Live workers, heartbeat TTL remaining, and what each is holding |
 | `GET /api/health` | open | Redis and Postgres reachability, pending/delayed depth, status tally |
+| `POST /api/auth/login` | — | Password → session cookie. `401` wrong, `429` throttled |
+| `POST /api/auth/logout` | — | Clears the cookie |
+| `GET /api/auth/me` | open | Whether this browser is signed in, and whether login is configured |
 
-**Authentication.** Writing needs a key; reading does not, so the dashboard is viewable by anyone.
-Generate a key and put it in `.env`:
+**Authentication.** Reading is always open, so the dashboard is viewable by anyone. Writing takes
+either of two proofs, because there are two kinds of caller:
+
+| Caller | Proof | Why |
+| --- | --- | --- |
+| a machine — cron, another service | `Authorization: Bearer <api key>` | a browser cannot hold a key secret |
+| you, in the dashboard | session cookie, from the password | a cron has no browser to log in with |
 
 ```bash
-npm run key:new          # prints qf_…
-# API_KEYS=qf_…          in .env, comma-separated for more than one
+npm run key:new          # prints qf_… — use it for API_KEYS, ADMIN_PASSWORD and SESSION_SECRET
 ```
 
-Callers send it as `Authorization: Bearer <key>`. A missing or unknown key gets `401`. Keys are
-compared in constant time and never logged.
+```
+API_KEYS=qf_…            comma-separated for more than one machine client
+ADMIN_PASSWORD=qf_…      unlocks the dashboard's actions; empty hides the Sign in button
+SESSION_SECRET=qf_…      signs the cookie; without it every restart signs you out
+```
 
-**With `API_KEYS` empty the write routes are open** — so a fresh clone runs with no setup — and the
-API says so loudly at startup. Set a key before deploying anywhere reachable: `deliver_webhook`
-means an open `POST /api/jobs` lets a stranger make your server send requests to any URL.
+Both secrets are compared in constant time and neither is ever logged. The session cookie is
+`httpOnly` (JavaScript cannot read it, so an XSS cannot steal it), `sameSite=lax`, `secure` over
+HTTPS, and valid 12 hours. Login is throttled to 5 failed attempts per IP per 15 minutes.
+
+**With neither `API_KEYS` nor `ADMIN_PASSWORD` set the write routes are open** — so a fresh clone
+runs with no setup — and the API says so loudly at startup. Set at least one before deploying
+anywhere reachable: `deliver_webhook` means an open `POST /api/jobs` lets a stranger make your
+server send requests to any URL.
 
 **`Idempotency-Key`.** `POST /api/jobs` accepts the header, and sending the same key twice returns the
 original job with `200` and `deduplicated: true` rather than creating a second one. It exists because
@@ -486,11 +504,18 @@ demonstrates it. In summary:
 - **API keys live in an env var**, not a table: no per-client naming, no revocation, no last-used
   timestamp, no expiry, and no rate limiting. Right size for a couple of machine clients; fifty
   would want an `api_keys` table with hashed values.
+- **One operator password, no users table** — no roles, no reset, no per-person audit trail. Five
+  operators would want users with bcrypt and roles.
+- **Sessions are stateless.** Nothing is stored server-side, so signing out on one device does not
+  end the session on another, and a stolen cookie stays valid until it expires. A session table
+  would fix both, at the cost of a lookup per request.
+- **The login throttle is per-process and in memory** — it resets on restart and does not add up
+  across several API instances.
 
 ## Roadmap
 
-Dashboard: DLQ with replay, a submit form, and operator login · graceful shutdown on `SIGTERM` ·
-error classification so a `400` is not retried · containerised deployment with CI.
+Dashboard: DLQ with replay and a submit form · graceful shutdown on `SIGTERM` · error
+classification so a `400` is not retried · containerised deployment with CI.
 
 ---
 
@@ -510,7 +535,9 @@ src/
     retry.ts         backoff policy: exponential, capped, jittered
     heartbeat.ts     the "still alive" key, and its TTL
   db/migrate.ts      applies db/schema.sql
-  api/index.ts       HTTP producer; serves the dashboard when web/dist exists
+  api/
+    index.ts         HTTP producer; serves the dashboard when web/dist exists
+    auth.ts          who may write: API keys, the operator password, the session cookie
   worker/
     index.ts         consumer loop, handoff, leases, lifecycle transitions
     handlers.ts      job type implementations
@@ -530,6 +557,7 @@ test/
 web/                   the dashboard — Vite + React, its own package
   src/
     api/               one file per API resource; client.ts is the fetch wrapper
+    auth.ts            useAuth() — sign in/out over the ['me'] query
     pages/             one component per route
     types.ts           the API's JSON shapes as the browser sees them
 ```

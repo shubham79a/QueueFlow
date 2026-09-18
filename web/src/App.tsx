@@ -3,6 +3,7 @@ import JobsPage from './pages/JobsPage.tsx'
 import JobDetailPage from './pages/JobDetailPage.tsx'
 import WorkersPage from './pages/WorkersPage.tsx'
 import HealthStrip from './components/HealthStrip.tsx'
+import LoginBar from './components/LoginBar.tsx'
 
 // Layout + routes. DLQ is a placeholder until its feature lands.
 export default function App() {
@@ -18,6 +19,7 @@ export default function App() {
           <NavLink to="/dlq">DLQ</NavLink>
         </nav>
         <HealthStrip />
+        <LoginBar />
       </header>
 
       <main>

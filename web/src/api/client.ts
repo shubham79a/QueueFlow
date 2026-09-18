@@ -16,6 +16,9 @@ export class ApiError extends Error {
 export async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`/api${path}`, {
     ...init,
+    // Send the session cookie. Same-origin is already the default for fetch, but stating
+    // it here means every call carries it without each caller remembering to.
+    credentials: 'same-origin',
     headers: { 'Content-Type': 'application/json', ...init?.headers },
   })
 
