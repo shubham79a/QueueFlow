@@ -2,6 +2,7 @@ import { NavLink, Route, Routes } from 'react-router-dom'
 import JobsPage from './pages/JobsPage.tsx'
 import JobDetailPage from './pages/JobDetailPage.tsx'
 import WorkersPage from './pages/WorkersPage.tsx'
+import DlqPage from './pages/DlqPage.tsx'
 import HealthStrip from './components/HealthStrip.tsx'
 import LoginBar from './components/LoginBar.tsx'
 
@@ -27,14 +28,10 @@ export default function App() {
           <Route path="/" element={<JobsPage />} />
           <Route path="/jobs/:id" element={<JobDetailPage />} />
           <Route path="/workers" element={<WorkersPage />} />
-          <Route path="/dlq" element={<Placeholder name="Dead-letter queue" />} />
+          <Route path="/dlq" element={<DlqPage />} />
           <Route path="*" element={<p className="muted">Nothing here.</p>} />
         </Routes>
       </main>
     </>
   )
-}
-
-function Placeholder({ name }: { name: string }) {
-  return <p className="muted">{name} — coming next.</p>
 }

@@ -5,6 +5,9 @@ export interface Me {
   // False when no ADMIN_PASSWORD is configured — the UI then offers no Sign in at all,
   // rather than a button that cannot work.
   loginEnabled: boolean
+  // True when the server has neither keys nor a password, so writes are open to
+  // everyone. Lets the UI tell "sign in first" apart from "nothing to sign in to".
+  writeOpen: boolean
 }
 
 export function getMe(): Promise<Me> {

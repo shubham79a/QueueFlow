@@ -15,6 +15,13 @@ export const JOB_STATUSES = [
 
 export type JobStatus = (typeof JOB_STATUSES)[number]
 
+// Mirrors JOB_TYPES in ../src/shared/types.ts. Adding a job type means adding it in
+// both places — the server rejects an unknown type with 400, so the mismatch shows up
+// immediately rather than silently.
+export const JOB_TYPES = ['sleep', 'always_fail', 'deliver_webhook'] as const
+
+export type JobType = (typeof JOB_TYPES)[number]
+
 export interface Job {
   id: string
   type: string

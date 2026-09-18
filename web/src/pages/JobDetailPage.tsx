@@ -4,6 +4,7 @@ import { getJob } from '../api/jobs.ts'
 import { ApiError } from '../api/client.ts'
 import { duration, fmtTime, shortId, until } from '../format.ts'
 import StatusBadge from '../components/StatusBadge.tsx'
+import ReplayButton from '../components/ReplayButton.tsx'
 
 // One job, everything the row holds. Polls too, so you can sit on a retrying job and
 // watch attempts climb and nextRunAt move.
@@ -42,6 +43,9 @@ export default function JobDetailPage() {
         <h1 className="mono">{shortId(j.id)}</h1>
         <StatusBadge status={j.status} />
         <span className="muted">{j.type}</span>
+        {/* Only dead jobs can be replayed — the API answers 409 otherwise, so the
+            button is offered only where it applies. */}
+        {j.status === 'dead' && <ReplayButton jobId={j.id} />}
       </div>
 
       <dl className="kv">

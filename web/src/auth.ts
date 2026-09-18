@@ -23,9 +23,16 @@ export function useAuth() {
     onSuccess: () => qc.invalidateQueries({ queryKey: ['me'] }),
   })
 
+  const authenticated = me.data?.authenticated ?? false
+  const writeOpen = me.data?.writeOpen ?? false
+
   return {
-    authenticated: me.data?.authenticated ?? false,
+    authenticated,
     loginEnabled: me.data?.loginEnabled ?? false,
+    // What the action buttons check. Mirrors requireWrite on the server: a session,
+    // or a server with no auth configured at all. (An API key is the third way in,
+    // but a browser never holds one.)
+    canWrite: authenticated || writeOpen,
     ready: me.isSuccess,
     signIn,
     signOut,

@@ -111,24 +111,7 @@ main {
   width: 170px;
 }
 
-.loginbar button {
-  font: inherit;
-  padding: 3px 10px;
-  border: 1px solid var(--line);
-  border-radius: 3px;
-  background: #fff;
-  cursor: pointer;
-}
-
-.loginbar button:hover:not(:disabled) {
-  border-color: var(--accent);
-  color: var(--accent);
-}
-
-.loginbar button:disabled {
-  opacity: 0.5;
-  cursor: default;
-}
+/* buttons themselves are styled once, further down */
 
 /* ---- page chrome ----------------------------------------------------------- */
 
@@ -228,6 +211,100 @@ pre.error-box {
   background: #fef2f2;
   color: #991b1b;
   white-space: pre-wrap;
+}
+
+/* ---- buttons, shared -------------------------------------------------------- */
+
+button {
+  font: inherit;
+  padding: 3px 10px;
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  background: #fff;
+  cursor: pointer;
+}
+
+button:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+button.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+
+button.primary:hover:not(:disabled) {
+  color: #fff;
+  filter: brightness(1.1);
+}
+
+button.linkish {
+  border: none;
+  background: none;
+  color: var(--muted);
+  padding: 3px 0;
+}
+
+.hint {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+/* ---- new job form ----------------------------------------------------------- */
+
+.newjob {
+  background: #fff;
+  border: 1px solid var(--line);
+  padding: 14px 16px;
+  margin-bottom: 16px;
+}
+
+.form-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 14px;
+  margin-bottom: 10px;
+}
+
+.form-row:last-of-type {
+  margin-bottom: 0;
+}
+
+.newjob input,
+.newjob select {
+  font: inherit;
+  padding: 3px 8px;
+  border: 1px solid var(--line);
+  border-radius: 3px;
+}
+
+pre.preview {
+  margin: 10px 0 0;
+  padding: 8px 10px;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--muted);
+  overflow-x: auto;
+}
+
+/* ---- dlq -------------------------------------------------------------------- */
+/* Errors can be long; keep the row one line and put the rest in the tooltip. */
+
+td.error-cell {
+  max-width: 420px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: #b91c1c;
 }
 
 /* ---- workers ---------------------------------------------------------------- */

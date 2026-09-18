@@ -96,10 +96,17 @@ A React app in [web/](web/) that shows the system as it runs. Read-only, no logi
 | **Jobs** | recent jobs with a status filter — queue wait and run time per row, refreshing every 2 s |
 | **Job detail** | one job: payload, attempts, error, all three timestamps, the next retry if it is backing off |
 | **Workers** | every worker from its heartbeat key — alive or gone, TTL counting down, what it is holding. Kill a worker mid-job and watch its row turn red, then empty as the reaper takes over |
+| **DLQ** | jobs that exhausted their attempts, each with its error and a **Replay** button |
 | **Health strip** | in the header: Redis and Postgres up or down, queue depth, jobs by status |
 
-Signing in with the operator password unlocks the actions that write — Replay today, the submit
-form next. Everything above stays readable signed out.
+Signing in with the operator password unlocks the two actions that write: **New job** on the Jobs
+page, and **Replay** in the DLQ. Everything else stays readable signed out — the buttons are shown
+disabled rather than hidden, so a visitor can see what exists.
+
+**The demo, end to end, without a terminal:** sign in → New job → type `deliver_webhook`, url
+`http://127.0.0.1:9999/nowhere` → Create. Watch the row go `running` → `retrying` with the backoff
+counting down on its detail page → five attempts → `dead`. Open the DLQ, read the error, press
+Replay, and watch it start over with `attempts` back to zero.
 
 In development it runs on its own port and proxies API calls through:
 
@@ -514,8 +521,8 @@ demonstrates it. In summary:
 
 ## Roadmap
 
-Dashboard: DLQ with replay and a submit form · graceful shutdown on `SIGTERM` · error
-classification so a `400` is not retried · containerised deployment with CI.
+Graceful shutdown on `SIGTERM` · error classification so a `400` is not retried · containerised
+deployment with CI.
 
 ---
 
@@ -557,7 +564,8 @@ test/
 web/                   the dashboard — Vite + React, its own package
   src/
     api/               one file per API resource; client.ts is the fetch wrapper
-    auth.ts            useAuth() — sign in/out over the ['me'] query
+    auth.ts            useAuth() — sign in/out, and canWrite for the action buttons
+    components/        StatusBadge, HealthStrip, LoginBar, NewJobForm, ReplayButton
     pages/             one component per route
     types.ts           the API's JSON shapes as the browser sees them
 ```

@@ -338,10 +338,18 @@ api.post("/auth/logout", (_req, res) => {
   return res.json({ ok: true });
 });
 
-// How the dashboard decides what to render: whether to show Sign in at all, and
-// whether the actions are available.
+// How the dashboard decides what to render: whether to offer Sign in at all, and
+// whether the actions that write are available.
+//
+// writeOpen is the fresh-clone case — no key, no password, so requireWrite lets
+// everything through. Without it the UI cannot tell "sign in to do this" from
+// "there is nothing to sign in to", and would disable buttons that work.
 api.get("/auth/me", (req, res) => {
-  return res.json({ authenticated: hasSession(req), loginEnabled: LOGIN_ENABLED });
+  return res.json({
+    authenticated: hasSession(req),
+    loginEnabled: LOGIN_ENABLED,
+    writeOpen: AUTH_DISABLED,
+  });
 });
 
 // Last handler on the router: an unknown /api/* path is a JSON 404. Without this it
