@@ -126,6 +126,30 @@ npm run dev:api           # now also serves the dashboard at http://localhost:40
 The API checks for `web/dist/index.html` at startup and serves it if present; otherwise it runs
 exactly as before. Every JSON route lives under `/api` so the two never collide.
 
+### Running it from containers
+
+`docker-compose.prod.yml` starts the whole system — both stores, a one-shot migration, and the
+three application processes — with no Node installed on the host:
+
+```bash
+cp .env.example .env      # set API_KEYS or ADMIN_PASSWORD, and SESSION_SECRET
+docker compose -f docker-compose.prod.yml up -d --build
+```
+
+The dashboard is then at <http://localhost:4000>, served by the API container.
+
+**One image, three roles.** `api`, `worker` and `scheduler` are the same build; only the `command:`
+differs. Running three copies of one image is what keeps them in step, and it is the same shape a
+PaaS expects — a process group per role, one artifact.
+
+```bash
+docker compose -f docker-compose.prod.yml up -d --scale worker=3
+```
+
+Workers need distinct ids, because the id names the Redis key holding that worker's in-flight jobs.
+With `WORKER_ID` unset a worker falls back to its hostname, which in a container is the container
+id — so scaling needs no configuration.
+
 ### Submitting work
 
 ```bash
@@ -519,16 +543,42 @@ demonstrates it. In summary:
 - **The login throttle is per-process and in memory** — it resets on restart and does not add up
   across several API instances.
 
+## Deploying
+
+The image is host-agnostic: anything that can run a container and give it three commands will do.
+
+**What it needs.** A Postgres with a persistent volume — it holds every job that ever ran, and
+losing it empties the dashboard. A Redis, which may be volatile: it is a transport, and nothing
+lives only in Redis. Then the three processes.
+
+**Before it is reachable from anywhere**, set `API_KEYS` or `ADMIN_PASSWORD` (the API warns loudly
+at startup when neither is set and the write routes are open), `SESSION_SECRET`, and `TRUST_PROXY=1`
+if something terminates TLS in front of it.
+
+**On a VM** — the simplest always-on option — clone, set `.env`, and
+`docker compose -f docker-compose.prod.yml up -d`. Everything runs as it does locally.
+
+**On a PaaS**, build the one image and run three process groups from it, pointing `REDIS_URL` and
+`DATABASE_URL` at managed instances. Anything that sleeps when idle is a poor fit: a sleeping worker
+is a queue that does not drain.
+
+**A redeploy currently re-runs in-flight jobs.** `SIGTERM` is not handled, so stopping a worker is
+indistinguishable from a crash — the reaper returns its jobs after the heartbeat expires and they
+run again. The lease makes that safe, and the work is not lost, but it is wasted. Graceful shutdown
+is the next thing on the list.
+
 ## Roadmap
 
-Graceful shutdown on `SIGTERM` · error classification so a `400` is not retried · containerised
-deployment with CI.
+Graceful shutdown on `SIGTERM` · error classification so a `400` is not retried · CI.
 
 ---
 
 ## Layout
 
 ```text
+Dockerfile           one image, three roles — api, worker, scheduler
+docker-compose.yml   Redis + Postgres for local development
+docker-compose.prod.yml  the whole system from containers
 db/schema.sql        tables, constraints, indexes
 gaps/                known limitations, per milestone
 src/

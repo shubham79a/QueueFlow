@@ -40,6 +40,18 @@ const redis = createRedis("api", log);
 const db = createDb("api", log);
 
 const app = express();
+
+// Behind a reverse proxy — which is every deployment — the connection Express sees is
+// plain HTTP from the proxy, even when the browser used HTTPS. So `req.secure` is false
+// and the session cookie never gets its Secure flag, meaning it would happily be sent
+// over an unencrypted connection. Trusting the proxy's X-Forwarded-Proto fixes that.
+//
+// Off by default, because trusting that header when there is NO proxy in front lets any
+// client claim its own connection is secure just by sending it.
+if (process.env.TRUST_PROXY) {
+  app.set("trust proxy", Number(process.env.TRUST_PROXY) || 1);
+}
+
 app.use(express.json());
 
 // Every JSON route lives on this router, mounted at /api. The prefix exists because the

@@ -1,0 +1,125 @@
+# The whole system, from containers.
+#
+#   docker compose -f docker-compose.prod.yml up -d --build
+#
+# Six services: the two stores, a one-shot migration, and the three application
+# processes — all three from the same image, differing only in `command:`.
+#
+# Configuration comes from a .env file next to this one. At minimum set API_KEYS or
+# ADMIN_PASSWORD (or both) and SESSION_SECRET before this is reachable from anywhere;
+# see .env.example.
+
+# The shared environment, as its own anchor.
+#
+# It is separate from &app because `<<:` merges one level only — a service that
+# declares its own `environment:` REPLACES the whole map rather than adding to it.
+# So each service merges this map explicitly with `<<: *env` and adds its extras.
+x-env: &env
+  # Inside the compose network the stores answer on their service names and their
+  # real ports — the 5433 in the local setup is only there because this machine
+  # already runs a Postgres.
+  REDIS_URL: redis://redis:6379
+  DATABASE_URL: postgres://queueflow:${POSTGRES_PASSWORD:-queueflow}@postgres:5432/queueflow
+
+  API_KEYS: ${API_KEYS:-}
+  ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
+  SESSION_SECRET: ${SESSION_SECRET:-}
+
+  RETRY_BASE_MS: ${RETRY_BASE_MS:-1000}
+  RETRY_MAX_MS: ${RETRY_MAX_MS:-60000}
+  HEARTBEAT_TTL_S: ${HEARTBEAT_TTL_S:-30}
+  HEARTBEAT_INTERVAL_MS: ${HEARTBEAT_INTERVAL_MS:-10000}
+  REAP_INTERVAL_MS: ${REAP_INTERVAL_MS:-5000}
+  ORPHAN_AGE_S: ${ORPHAN_AGE_S:-60}
+  FENCING: ${FENCING:-on}
+
+x-app: &app
+  build: .
+  image: queueflow:latest
+  restart: unless-stopped
+  depends_on:
+    migrate:
+      condition: service_completed_successfully
+
+services:
+  redis:
+    image: redis:7.2-alpine
+    restart: unless-stopped
+    # Persistence stays off, for the reason in docker-compose.yml: Redis is a
+    # transport, and half-durability is worse than either extreme. Everything that
+    # matters is in Postgres.
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: queueflow
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-queueflow}
+      POSTGRES_DB: queueflow
+    # The volume is the point. This is the record of every job that ever ran; without
+    # it a restart empties the dashboard.
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U queueflow -d queueflow"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # Runs schema.sql and exits. Everything in it is IF NOT EXISTS, so running it on
+  # every deploy is safe and means a schema change needs no separate step.
+  migrate:
+    build: .
+    image: queueflow:latest
+    command: ["node", "dist/db/migrate.js"]
+    restart: "no"
+    environment:
+      DATABASE_URL: postgres://queueflow:${POSTGRES_PASSWORD:-queueflow}@postgres:5432/queueflow
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  api:
+    <<: *app
+    command: ["node", "dist/api/index.js"]
+    environment:
+      <<: *env
+      PORT: 4000
+      # Set this when something terminates TLS in front of the container — a
+      # reverse proxy, a load balancer, a PaaS router. Without it the session
+      # cookie loses its Secure flag. Leave unset when exposed directly.
+      TRUST_PROXY: ${TRUST_PROXY:-}
+    ports:
+      - "${API_PORT:-4000}:4000"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:4000/api/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  worker:
+    <<: *app
+    command: ["node", "dist/worker/index.js"]
+    environment:
+      <<: *env
+      # WORKER_ID deliberately not set. Each worker needs its own id — it names the Redis key
+      # holding that worker's in-flight jobs — and with WORKER_ID unset the worker
+      # falls back to its hostname, which in a container is the container id. So
+      # `--scale worker=3` gives three distinct ids with no configuration.
+      CONCURRENCY: ${CONCURRENCY:-5}
+
+  scheduler:
+    <<: *app
+    command: ["node", "dist/scheduler/index.js"]
+    environment:
+      <<: *env
+
+volumes:
+  pgdata:

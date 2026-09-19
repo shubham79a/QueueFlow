@@ -1,0 +1,23 @@
+# Everything here is either rebuilt inside the image, useless to it, or a secret.
+
+node_modules/
+web/node_modules/
+dist/
+web/dist/
+
+# Secrets. The image gets its configuration from the environment at run time.
+.env
+
+# Local notes, not part of the project.
+docs-no-commit/
+
+# The image ships the server and the dashboard. It has no business carrying the
+# test suite or the throughput benchmark.
+test/
+src/dev/
+
+.git/
+.github/
+*.log
+README.md
+gaps/

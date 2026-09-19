@@ -5,10 +5,18 @@ import { createDb, query } from "../shared/db.js";
 import { Semaphore } from "../shared/semaphore.js";
 import { startHeartbeat, TTL_S } from "../shared/heartbeat.js";
 import { nextDelayMs } from "../shared/retry.js";
+import { hostname } from "node:os";
 import { isUuid, rowToJob, type JobRow } from "../shared/types.js";
 import { handlers } from "./handlers.js";
 
-const WORKER_ID = process.env.WORKER_ID ?? "w1";
+// This worker's name. It is not just a log label — it names the Redis key holding this
+// worker's in-flight jobs, so two processes sharing it share that list.
+//
+// Falls back to the hostname rather than a fixed "w1" because of how this is deployed:
+// in a container the hostname is the container id, so `--scale worker=3` gives three
+// distinct ids for free. A hardcoded default would have all three replicas claiming one
+// name, which is the failure GAP-5.5 describes. Locally .env sets it explicitly.
+const WORKER_ID = process.env.WORKER_ID || hostname();
 
 
 // How many jobs this ONE process may have in flight at once.
