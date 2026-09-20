@@ -1,8 +1,20 @@
 import { useState } from 'react'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
-import { createJob, type CreatedJob } from '../api/jobs.ts'
-import { JOB_TYPES, type JobType } from '../types.ts'
-import { useAuth } from '../auth.ts'
+import { toast } from 'sonner'
+import { createJob, type CreatedJob } from '@/api/jobs'
+import { JOB_TYPES, type JobType } from '@/types'
+import { useAuth } from '@/auth'
+import { Button } from '@/components/ui/button'
+import { Card } from '@/components/ui/card'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select'
 
 // Create a job from the browser.
 //
@@ -46,8 +58,16 @@ export default function NewJobForm({ onDone }: { onDone: () => void }) {
       // The table below is a different query; tell it to refetch rather than waiting
       // out its 2s interval, so the new row appears immediately.
       void qc.invalidateQueries({ queryKey: ['jobs'] })
-      if (!res.deduplicated) onDone()
+      void qc.invalidateQueries({ queryKey: ['health'] })
+
+      if (res.deduplicated) {
+        toast.info('That key was already used — returned the original job, nothing created')
+        return
+      }
+      toast.success('Job created')
+      onDone()
     },
+    onError: (err) => toast.error(err.message),
   })
 
   function submit(e: React.FormEvent) {
@@ -61,70 +81,83 @@ export default function NewJobForm({ onDone }: { onDone: () => void }) {
   }
 
   return (
-    <form className="newjob" onSubmit={submit}>
-      <div className="form-row">
-        <label>
-          type{' '}
-          <select value={type} onChange={(e) => changeType(e.target.value as JobType)}>
-            {JOB_TYPES.map((t) => (
-              <option key={t} value={t}>
-                {t}
-              </option>
-            ))}
-          </select>
-        </label>
+    <Card className="p-4">
+      <form onSubmit={submit} className="space-y-4">
+        <div className="flex flex-wrap items-end gap-4">
+          <div className="space-y-1.5">
+            <Label>type</Label>
+            <Select value={type} onValueChange={(v) => changeType(v as JobType)}>
+              <SelectTrigger className="w-48">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {JOB_TYPES.map((t) => (
+                  <SelectItem key={t} value={t}>
+                    {t}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
 
-        {Object.entries(fields).map(([key, value]) => (
-          <label key={key}>
-            {key}{' '}
-            <input
-              value={value}
-              onChange={(e) => set(key, e.target.value)}
-              size={key === 'url' || key === 'message' ? 34 : 8}
-            />
-          </label>
-        ))}
-      </div>
+          {Object.entries(fields).map(([key, value]) => (
+            <div key={key} className="space-y-1.5">
+              <Label htmlFor={`f-${key}`}>{key}</Label>
+              <Input
+                id={`f-${key}`}
+                value={value}
+                onChange={(e) => set(key, e.target.value)}
+                className={key === 'url' || key === 'message' ? 'w-80' : 'w-32'}
+              />
+            </div>
+          ))}
 
-      <div className="form-row">
-        <button type="submit" className="primary" disabled={!canWrite || create.isPending}>
-          {create.isPending ? 'creating…' : 'Create'}
-        </button>
-        <button type="button" onClick={onDone}>
-          Cancel
-        </button>
+          {showKey && (
+            <div className="space-y-1.5">
+              <Label htmlFor="f-idem">Idempotency-Key</Label>
+              <Input
+                id="f-idem"
+                value={idempotencyKey}
+                onChange={(e) => setIdempotencyKey(e.target.value)}
+                placeholder="order-4471"
+                className="w-44"
+              />
+            </div>
+          )}
+        </div>
 
-        {!showKey && (
-          <button type="button" className="linkish" onClick={() => setShowKey(true)}>
-            + idempotency key
-          </button>
-        )}
-        {showKey && (
-          <label>
-            Idempotency-Key{' '}
-            <input
-              value={idempotencyKey}
-              onChange={(e) => setIdempotencyKey(e.target.value)}
-              placeholder="order-4471"
-              size={16}
-            />
-          </label>
-        )}
+        <div className="flex flex-wrap items-center gap-3">
+          <Button type="submit" size="sm" disabled={!canWrite || create.isPending}>
+            {create.isPending ? 'creating…' : 'Create'}
+          </Button>
+          <Button type="button" variant="ghost" size="sm" onClick={onDone}>
+            Cancel
+          </Button>
+          {!showKey && (
+            <Button
+              type="button"
+              variant="link"
+              size="sm"
+              className="text-muted-foreground"
+              onClick={() => setShowKey(true)}
+            >
+              + idempotency key
+            </Button>
+          )}
 
-        {!canWrite && <span className="hint">sign in to create jobs</span>}
-        {invalid && <span className="error">{invalid}</span>}
-        {create.isError && <span className="error">{create.error.message}</span>}
-        {create.data?.deduplicated && (
-          <span className="hint">
-            that key was already used — returned the original job, nothing new created
-          </span>
-        )}
-      </div>
+          {!canWrite && (
+            <span className="text-muted-foreground text-xs">sign in to create jobs</span>
+          )}
+          {invalid && <span className="text-destructive text-xs">{invalid}</span>}
+        </div>
 
-      {/* What actually goes over the wire. Four lines, and it makes the form
-          self-explanatory rather than magic. */}
-      <pre className="preview">POST /api/jobs {JSON.stringify({ type, payload })}</pre>
-    </form>
+        {/* What actually goes over the wire. It makes the form self-explanatory
+            rather than magic, and it is the same body the curl examples send. */}
+        <pre className="bg-muted text-muted-foreground overflow-x-auto rounded-md p-3 font-mono text-xs">
+          POST /api/jobs {JSON.stringify({ type, payload })}
+        </pre>
+      </form>
+    </Card>
   )
 }
 

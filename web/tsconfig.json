@@ -3,5 +3,12 @@
   "references": [
     { "path": "./tsconfig.app.json" },
     { "path": "./tsconfig.node.json" }
-  ]
+  ],
+  // The shadcn CLI reads the alias from here rather than from tsconfig.app.json,
+  // so it is declared in both. The app config is the one the typechecker uses.
+  "compilerOptions": {
+    "paths": {
+      "@/*": ["./src/*"]
+    }
+  }
 }

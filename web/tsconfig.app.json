@@ -20,7 +20,14 @@
     "noUnusedLocals": true,
     "noUnusedParameters": true,
     "erasableSyntaxOnly": true,
-    "noFallthroughCasesInSwitch": true
+    "noFallthroughCasesInSwitch": true,
+
+    /* shadcn/ui components import from "@/..." — the matching alias for the bundler
+       is in vite.config.ts. No baseUrl: TypeScript 6 deprecates it, and paths now
+       resolve relative to this file. */
+    "paths": {
+      "@/*": ["./src/*"]
+    }
   },
   "include": ["src"]
 }

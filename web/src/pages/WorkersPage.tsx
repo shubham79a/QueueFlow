@@ -1,7 +1,9 @@
 import { Link } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
-import { listWorkers } from '../api/workers.ts'
-import { shortId } from '../format.ts'
+import { listWorkers } from '@/api/workers'
+import { shortId } from '@/format'
+import { Card } from '@/components/ui/card'
+import { Skeleton } from '@/components/ui/skeleton'
 
 // One second, not two: the heartbeat TTL counting down is the whole point of this
 // page, and a 2 s poll would make it skip.
@@ -15,71 +17,90 @@ export default function WorkersPage() {
   })
 
   return (
-    <section>
-      <div className="toolbar">
-        <h1>Workers</h1>
-        <span className="muted">
-          from Redis alone — heartbeat keys and processing lists. Refreshes every second.
+    <div className="space-y-6">
+      <div className="flex flex-wrap items-center gap-3">
+        <h1 className="text-lg font-semibold">Workers</h1>
+        <span className="text-muted-foreground text-xs">
+          from Redis alone — heartbeat keys and processing lists
         </span>
       </div>
 
       {workers.isError && (
-        <p className="error">Could not load workers: {workers.error.message}</p>
+        <p className="text-destructive text-sm">Could not load workers: {workers.error.message}</p>
       )}
 
-      {workers.data && workers.data.length === 0 && (
-        <p className="muted">No workers running. Start one with <code>npm run dev:worker</code>.</p>
+      {workers.isPending && (
+        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+          {Array.from({ length: 3 }, (_, i) => (
+            <Skeleton key={i} className="h-28 w-full" />
+          ))}
+        </div>
       )}
 
-      {workers.data && workers.data.length > 0 && (
-        <table>
-          <thead>
-            <tr>
-              <th>worker</th>
-              <th>status</th>
-              <th>heartbeat</th>
-              <th>holding</th>
-              <th>jobs</th>
-            </tr>
-          </thead>
-          <tbody>
-            {workers.data.map((w) => {
-              // The row this page exists for: the heartbeat has lapsed but the
-              // processing list is not empty. That is a crashed worker, seen in the
-              // window between its key expiring and the reaper's next pass.
-              const stranded = !w.alive && w.holding > 0
-
-              return (
-                <tr key={w.id} className={stranded ? 'row-warn' : undefined}>
-                  <td className="mono">{w.id}</td>
-                  <td>
-                    <span className={`badge ${w.alive ? 'badge-succeeded' : 'badge-dead'}`}>
-                      {w.alive ? 'alive' : 'gone'}
-                    </span>
-                  </td>
-                  <td className="mono">
-                    {w.expiresInSeconds !== null ? `${w.expiresInSeconds}s left` : '—'}
-                  </td>
-                  <td>
-                    {w.holding}
-                    {stranded && (
-                      <span className="muted"> — stopped responding; the reaper will return these</span>
-                    )}
-                  </td>
-                  <td className="mono">
-                    {w.jobs.map((id, i) => (
-                      <span key={id}>
-                        {i > 0 && ', '}
-                        <Link to={`/jobs/${id}`}>{shortId(id)}</Link>
-                      </span>
-                    ))}
-                  </td>
-                </tr>
-              )
-            })}
-          </tbody>
-        </table>
+      {workers.data?.length === 0 && (
+        <Card className="p-10 text-center">
+          <p className="text-muted-foreground text-sm">
+            No workers running. Start one with <code className="font-mono">npm run dev:worker</code>
+            .
+          </p>
+        </Card>
       )}
-    </section>
+
+      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+        {workers.data?.map((w) => {
+          // The card this page exists for: the heartbeat has lapsed but the processing
+          // list is not empty. That is a crashed worker, seen in the window between its
+          // key expiring and the reaper's next pass.
+          const stranded = !w.alive && w.holding > 0
+
+          return (
+            <Card
+              key={w.id}
+              className={`gap-3 p-4 ${stranded ? 'border-bad bg-bad/5' : ''}`}
+            >
+              <div className="flex items-center gap-2">
+                <span
+                  className={`h-2 w-2 rounded-full ${w.alive ? 'bg-ok' : 'bg-bad animate-pulse'}`}
+                />
+                <span className="truncate font-mono text-sm">{w.id}</span>
+                <span
+                  className={`ml-auto text-xs font-medium ${w.alive ? 'text-ok' : 'text-bad'}`}
+                >
+                  {w.alive ? 'alive' : 'gone'}
+                </span>
+              </div>
+
+              <div className="text-muted-foreground flex items-baseline gap-4 text-xs">
+                <span className="tabular-nums">
+                  heartbeat{' '}
+                  {w.expiresInSeconds !== null ? `${w.expiresInSeconds}s left` : 'expired'}
+                </span>
+                <span className="tabular-nums">holding {w.holding}</span>
+              </div>
+
+              {stranded && (
+                <p className="text-bad text-xs">
+                  stopped responding — the reaper will return these jobs
+                </p>
+              )}
+
+              {w.jobs.length > 0 && (
+                <div className="flex flex-wrap gap-x-2 gap-y-1">
+                  {w.jobs.map((id) => (
+                    <Link
+                      key={id}
+                      to={`/jobs/${id}`}
+                      className="text-primary font-mono text-xs hover:underline"
+                    >
+                      {shortId(id)}
+                    </Link>
+                  ))}
+                </div>
+              )}
+            </Card>
+          )
+        })}
+      </div>
+    </div>
   )
 }
