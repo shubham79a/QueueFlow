@@ -1,4 +1,5 @@
-import { NavLink, Route, Routes } from 'react-router-dom'
+import { Link, NavLink, Route, Routes } from 'react-router-dom'
+import HomePage from '@/pages/HomePage'
 import JobsPage from '@/pages/JobsPage'
 import JobDetailPage from '@/pages/JobDetailPage'
 import WorkersPage from '@/pages/WorkersPage'
@@ -7,8 +8,10 @@ import HealthStrip from '@/components/HealthStrip'
 import LoginBar from '@/components/LoginBar'
 import ModeToggle from '@/components/ModeToggle'
 
+// `end` controls when a tab counts as active. Jobs needs end:false so that
+// /jobs/<id> keeps the Jobs tab lit while you are reading one job.
 const NAV = [
-  { to: '/', label: 'Jobs', end: true },
+  { to: '/jobs', label: 'Jobs', end: false },
   { to: '/workers', label: 'Workers', end: false },
   { to: '/dlq', label: 'DLQ', end: false },
 ]
@@ -18,7 +21,9 @@ export default function App() {
     <div className="min-h-screen">
       <header className="bg-background/80 sticky top-0 z-10 border-b backdrop-blur">
         <div className="mx-auto flex h-14 max-w-7xl items-center gap-6 px-4">
-          <span className="font-semibold tracking-tight">QueueFlow</span>
+          <Link to="/" className="font-semibold tracking-tight">
+            QueueFlow
+          </Link>
 
           <nav className="flex items-center gap-1">
             {NAV.map((n) => (
@@ -49,7 +54,11 @@ export default function App() {
 
       <main className="mx-auto max-w-7xl px-4 py-6">
         <Routes>
-          <Route path="/" element={<JobsPage />} />
+          <Route path="/" element={<HomePage />} />
+          {/* The status filter is /jobs?status=dead rather than /jobs/dead, because
+              /jobs/:id already means one job — a path segment could not tell a
+              status from an id. */}
+          <Route path="/jobs" element={<JobsPage />} />
           <Route path="/jobs/:id" element={<JobDetailPage />} />
           <Route path="/workers" element={<WorkersPage />} />
           <Route path="/dlq" element={<DlqPage />} />

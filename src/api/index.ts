@@ -1,7 +1,14 @@
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { join, resolve } from "node:path";
-import express from "express";
+import express, { type NextFunction, type Request, type Response } from "express";
+import {
+  BadRequest,
+  decodeCursor,
+  encodeCursor,
+  parseLimit,
+  parseStatus,
+} from "./params.js";
 import {
   KEYS,
   scanKeys,
@@ -25,13 +32,7 @@ import {
   requireWrite,
   setSessionCookie,
 } from "./auth.js";
-import {
-  isJobType,
-  rowToJob,
-  validatePayload,
-  type JobRow,
-  type JobStatus,
-} from "../shared/types.js";
+import { isJobType, rowToJob, validatePayload, type JobRow } from "../shared/types.js";
 
 const PORT = Number(process.env.PORT ?? 4000);
 
@@ -211,22 +212,66 @@ api.post<{ id: string }>("/jobs/:id/replay", requireWrite, async (req, res) => {
 
 // GET /jobs?status=&limit= — recent jobs, newest first. 
 api.get("/jobs", async (req, res) => {
-  const status = req.query.status as JobStatus | undefined;
-  const limit = Math.min(Number(req.query.limit ?? 20), 100);
+  const status = parseStatus(req.query.status);
+  const limit = parseLimit(req.query.limit);
+  const cursor = decodeCursor(req.query.cursor);
 
-  const rows = status
-    ? await query<JobRow>(
-      db,
-      `SELECT ${JOB_COLUMNS} FROM jobs WHERE status = $1 ORDER BY created_at DESC LIMIT $2`,
-      [status, limit],
-    )
-    : await query<JobRow>(
-      db,
-      `SELECT ${JOB_COLUMNS} FROM jobs ORDER BY created_at DESC LIMIT $1`,
-      [limit],
-    );
+  /**
+   * KEYSET, NOT OFFSET.
+   *
+   * OFFSET counts positions, and this list gains rows at the top every second or so.
+   * Between fetching page 1 and page 2, four new jobs shift everything down four
+   * places — so `OFFSET 20` now lands where `OFFSET 16` used to, and page 2 repeats
+   * four rows the caller has already seen. Deletions cause the mirror image: rows
+   * skipped entirely, silently.
+   *
+   * A cursor names a VALUE instead of a position. `(created_at, id) < (t, id)` means
+   * the same set of rows no matter what arrives above it.
+   *
+   * Comparing the pair rather than created_at alone is the tie-breaker: two rows can
+   * share a timestamp, and then `<` drops one and `<=` repeats one. Postgres compares
+   * tuples left to right, so this reads as "older, or the same instant with a smaller
+   * id" — which gives every row exactly one position.
+   */
+  const where: string[] = [];
+  const params: unknown[] = [];
 
-  return res.json(rows.map(rowToJob));
+  if (status) {
+    params.push(status);
+    where.push(`status = $${params.length}`);
+  }
+  if (cursor) {
+    params.push(cursor.t, cursor.id);
+    where.push(`(created_at, id) < ($${params.length - 1}, $${params.length})`);
+  }
+
+  /**
+   * Fetch one more row than asked for.
+   *
+   * If it comes back, there is another page. That is the whole of `hasMore`, and it
+   * avoids a COUNT(*) — which in Postgres scans, and would run on every poll of every
+   * open tab. The extra row is dropped before responding.
+   */
+  params.push(limit + 1);
+
+  const rows = await query<JobRow>(
+    db,
+    `SELECT ${JOB_COLUMNS} FROM jobs
+      ${where.length ? `WHERE ${where.join(" AND ")}` : ""}
+      ORDER BY created_at DESC, id DESC
+      LIMIT $${params.length}`,
+    params,
+  );
+
+  const hasMore = rows.length > limit;
+  const page = hasMore ? rows.slice(0, limit) : rows;
+  const last = page[page.length - 1];
+
+  return res.json({
+    jobs: page.map(rowToJob),
+    nextCursor:
+      hasMore && last ? encodeCursor({ t: last.created_at.toISOString(), id: last.id }) : null,
+  });
 });
 
 /**
@@ -368,6 +413,31 @@ api.get("/auth/me", (req, res) => {
 // would fall through to the dashboard fallback below and come back as HTML.
 api.use((_req, res) => {
   res.status(404).json({ error: "not found" });
+});
+
+/**
+ * The only place an unhandled error is allowed to reach the caller.
+ *
+ * Express 5 forwards a rejected promise from a route to here on its own, so no route
+ * needs a try/catch for this to work.
+ *
+ * Two shapes go out, and the split matters. A BadRequest is the caller's mistake and
+ * its message is written to be read by them. Anything else is ours, and the caller
+ * gets nothing but "internal error" — Express's default handler would have replied
+ * with the stack trace, which in development meant answering a malformed query
+ * parameter with the absolute paths of files on this machine.
+ *
+ * Four arguments, including one that is unused: Express identifies error middleware
+ * by arity, so dropping `_next` would quietly turn this into an ordinary handler that
+ * never runs.
+ */
+api.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
+  if (err instanceof BadRequest) {
+    return res.status(400).json({ error: err.message });
+  }
+
+  log.error(null, `unhandled: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`);
+  return res.status(500).json({ error: "internal error" });
 });
 
 app.use("/api", api);

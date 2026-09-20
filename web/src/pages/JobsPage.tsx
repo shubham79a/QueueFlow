@@ -1,8 +1,8 @@
 import { useState } from 'react'
-import { Link } from 'react-router-dom'
-import { useQuery } from '@tanstack/react-query'
+import { Link, useSearchParams } from 'react-router-dom'
 import { PlusIcon } from 'lucide-react'
-import { listJobs } from '@/api/jobs'
+import { useJobList } from '@/hooks/useJobList'
+import LoadMore from '@/components/LoadMore'
 import { JOB_STATUSES, type JobStatus } from '@/types'
 import { duration, shortId, timeAgo } from '@/format'
 import StatusBadge from '@/components/StatusBadge'
@@ -20,27 +20,47 @@ import {
 } from '@/components/ui/select'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 
-// How often the table asks the API for fresh rows. This one number is the whole
-// "live" feature — TanStack Query refetches on the interval and React re-renders
-// whatever changed.
-const REFRESH_MS = 2000
-
+// The Select needs a non-empty value for "no filter" — an empty string would make it
+// look unset rather than deliberately showing everything.
 const ALL = '__all__'
 
 export default function JobsPage() {
-  const [status, setStatus] = useState<JobStatus | ''>('')
+  /**
+   * The filter lives in the URL, not in useState.
+   *
+   * "Look at the dead ones" is a thing you send someone, so it has to survive being
+   * copied out of the address bar. Keeping it in component state meant
+   * /jobs?status=dead did not exist: the link was unshareable, a reload reset it,
+   * and Back left the page instead of undoing the filter.
+   *
+   * What does NOT go here is the paging cursor. You do not have "a page" — you have
+   * however many you have loaded — and a cursor names an instant that has already
+   * passed on a list that keeps growing. A shared link would reopen last Tuesday.
+   * Numbered pagination would belong in the URL; keyset does not.
+   */
+  const [params, setParams] = useSearchParams()
+
+  // Anyone can type into the address bar, and an unknown status would make the API
+  // answer 400. Treat anything unrecognised as no filter at all.
+  const raw = params.get('status') ?? ''
+  const status: JobStatus | '' = (JOB_STATUSES as readonly string[]).includes(raw)
+    ? (raw as JobStatus)
+    : ''
+
+  function changeStatus(next: JobStatus | '') {
+    // Dropping the parameter entirely rather than leaving `?status=` — the URL for
+    // "everything" should just be `/jobs`.
+    if (next) params.set('status', next)
+    else params.delete('status')
+    // A push, not a replace, so Back undoes the filter instead of leaving the page.
+    setParams(params)
+  }
+
   // The form lives here rather than on its own route so a new job appears in the
   // table below the moment it is created — that is the whole demo.
   const [creating, setCreating] = useState(false)
 
-  const jobs = useQuery({
-    // The status is part of the key, so switching the filter is a different query
-    // with its own cache entry — flipping back shows the old rows instantly while
-    // the fresh ones load.
-    queryKey: ['jobs', status],
-    queryFn: () => listJobs(status),
-    refetchInterval: REFRESH_MS,
-  })
+  const jobs = useJobList(status)
 
   return (
     <div className="space-y-6">
@@ -57,7 +77,7 @@ export default function JobsPage() {
         <div className="ml-auto flex items-center gap-2">
           <Select
             value={status === '' ? ALL : status}
-            onValueChange={(v) => setStatus(v === ALL ? '' : (v as JobStatus))}
+            onValueChange={(v) => changeStatus(v === ALL ? '' : (v as JobStatus))}
           >
             <SelectTrigger size="sm" className="w-36">
               <SelectValue />
@@ -84,7 +104,7 @@ export default function JobsPage() {
       {creating && <NewJobForm onDone={() => setCreating(false)} />}
 
       {jobs.isError && (
-        <p className="text-destructive text-sm">Could not load jobs: {jobs.error.message}</p>
+        <p className="text-destructive text-sm">Could not load jobs: {jobs.error?.message}</p>
       )}
 
       <Card className="overflow-hidden p-0">
@@ -111,7 +131,7 @@ export default function JobsPage() {
                   </TableRow>
                 ))}
 
-              {jobs.data?.length === 0 && (
+              {!jobs.isPending && jobs.rows.length === 0 && (
                 <TableRow>
                   <TableCell colSpan={7} className="text-muted-foreground py-10 text-center">
                     No jobs{status ? ` with status "${status}"` : ''} yet — press{' '}
@@ -120,7 +140,7 @@ export default function JobsPage() {
                 </TableRow>
               )}
 
-              {jobs.data?.map((job) => (
+              {jobs.rows.map((job) => (
                 <TableRow key={job.id}>
                   <TableCell>
                     <Link
@@ -151,6 +171,14 @@ export default function JobsPage() {
             </TableBody>
           </Table>
         </div>
+
+        <LoadMore
+          shown={jobs.rows.length}
+          total={jobs.total}
+          hasNextPage={jobs.hasNextPage}
+          isFetching={jobs.isFetchingNextPage}
+          onLoadMore={() => void jobs.fetchNextPage()}
+        />
       </Card>
     </div>
   )

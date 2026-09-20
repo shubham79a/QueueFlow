@@ -17,6 +17,7 @@ building. Several of the gaps below are the shape of that trade.
 | GAP-5.5 | Two processes sharing a `WORKER_ID` degrade quietly | not planned — documented |
 | GAP-5.6 | The reaper inherits the scheduler's single-point-of-failure problem | not planned — run two |
 | GAP-5.7 | `Idempotency-Key` records are kept forever | not planned |
+| GAP-5.8 | Losing Redis strands every `running` and `retrying` row permanently | not planned — documented |
 
 ---
 
@@ -173,3 +174,60 @@ time has passed.
 
 **Also unhandled.** The same key sent with a *different* payload silently returns the original job
 rather than rejecting the mismatch, which is what a stricter implementation would do.
+
+---
+
+## GAP-5.8 — Losing Redis strands `running` and `retrying` rows permanently
+
+**What.** Every recovery path in this system is triggered by something *in Redis*. `reapDead` starts
+by `SCAN`ning for `queueflow:processing:*` keys and works through whatever it finds. `sweepOrphans`
+starts from Postgres, but only looks at `WHERE status = 'queued'`.
+
+So if Redis goes away — an eviction, a restart without persistence, a `FLUSHALL`, a container
+recreated without its volume — the two recovery mechanisms disagree about who is responsible for
+what, and two kinds of row fall through the gap between them:
+
+- **`running`.** The processing list that named the job is gone, so `reapDead` has nothing to scan
+  and never learns the job existed. `sweepOrphans` skips it because its status is not `queued`. The
+  row stays `running` forever, against a worker that may not exist any more.
+- **`retrying`.** The row is waiting on a score in `queueflow:delayed` for the scheduler to promote
+  it. That ZSET is gone too, so the promotion never comes, and `reapWorker` explicitly treats
+  `retrying` as *already accounted for* — it assumes the ZSET entry exists. Nothing will ever look
+  at the row again.
+
+`queued` rows survive this, because that is exactly the case `sweepOrphans` was written for: the row
+says queued, nothing in Redis holds the id, push it back. The design is asymmetric because the
+*original* failure it was written for is asymmetric — the API crashing between the INSERT and the
+LPUSH only ever produces `queued` rows. Redis vanishing produces all three.
+
+**Why left.** Fixing it means the orphan sweep stops asking "is this row queued?" and starts asking
+"does Redis still hold this id?" for `running` and `retrying` rows too. That check is only safe when
+it is *certain* Redis is intact — otherwise a momentary connection failure looks identical to a wipe,
+and a sweep that trusted it would yank live jobs out of workers that are running them fine. The
+honest version needs an epoch or a generation marker in Redis so the scheduler can tell "empty
+because nothing is queued" from "empty because this is a different Redis than the one that was here a
+minute ago". That is a real piece of design, not a patch, and it belongs with the persistence
+decisions rather than bolted on here.
+
+The operational answer in the meantime is the cheaper one: **do not run Redis in a container without a
+volume**, which is why `docker-compose.prod.yml` gives it a named volume and AOF.
+
+**How to see it.**
+
+```bash
+# a job that will take a while, so it is genuinely mid-flight
+curl.exe -X POST http://localhost:4000/api/jobs -H "Content-Type: application/json" ^
+  -d "{\"type\":\"sleep\",\"payload\":{\"ms\":60000}}"
+
+# confirm it is running, then take Redis away underneath it
+docker compose exec redis redis-cli FLUSHALL
+```
+
+Wait past `ORPHAN_AGE_S` and the heartbeat TTL, with the scheduler running the whole time. The row
+stays `running`, the scheduler logs nothing, and no amount of waiting changes either. `GET /api/jobs`
+keeps reporting it as in progress.
+
+**Also worth knowing.** The seed data in `docs-no-commit` is this gap on purpose: it writes
+`retrying` rows with no matching ZSET entry, which is the same stranded state, reached by a different
+route. They sit there permanently, which is what makes them useful as demo rows and is also the point
+of this gap.

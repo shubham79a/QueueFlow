@@ -41,6 +41,8 @@ CREATE TABLE IF NOT EXISTS jobs (
 );
 
 -- Supports both "show me everything queued" and the orphan query in gaps/phase-2.md.
+-- Superseded further down by the three-column version, once pagination needed a
+-- tie-breaker; kept here so the file still reads in the order it was built.
 CREATE INDEX IF NOT EXISTS jobs_status_created_idx ON jobs (status, created_at);
 
 -- ---------------------------------------------------------------------------
@@ -131,3 +133,34 @@ ALTER TABLE jobs ADD COLUMN IF NOT EXISTS lease_id UUID;
 -- Supports the human question "what is running, and since when?" — the query that
 -- used to be the only evidence a worker had died.
 CREATE INDEX IF NOT EXISTS jobs_running_idx ON jobs (started_at) WHERE status = 'running';
+
+-- ---------------------------------------------------------------------------
+-- Paging the job list.
+--
+-- The dashboard walks the list newest-first with a keyset cursor:
+--
+--   WHERE (created_at, id) < ($time, $id)
+--   ORDER BY created_at DESC, id DESC
+--   LIMIT $n
+--
+-- The id is in there as a TIE-BREAKER, not as the cursor. Ids are UUIDv4, so their
+-- order has nothing to do with insertion order — paging on id alone would return an
+-- arbitrary subset. But two rows CAN share a created_at, and when they do, a cursor
+-- of `< created_at` silently drops one while `<=` returns one twice. Comparing the
+-- pair makes every row's position unique.
+-- ---------------------------------------------------------------------------
+
+-- For the unfiltered list. Until now nothing served it: jobs_status_created_idx
+-- leads with status, so `ORDER BY created_at DESC` with no status predicate fell
+-- back to a sequential scan and a sort — on every poll, of every open tab.
+--
+-- No DESC in the definition: a btree can be walked backwards, so (created_at, id)
+-- satisfies `ORDER BY created_at DESC, id DESC` just as well as a descending index.
+CREATE INDEX IF NOT EXISTS jobs_created_at_id_idx ON jobs (created_at, id);
+
+-- For the filtered list. Replaces (status, created_at) — the extra column moves the
+-- tie-breaker into the index instead of leaving it to a sort step, and the shorter
+-- index becomes redundant once this exists. Still serves the orphan sweep's
+-- `WHERE status = 'queued' AND created_at < …`, which only reads the first two.
+DROP INDEX IF EXISTS jobs_status_created_idx;
+CREATE INDEX IF NOT EXISTS jobs_status_created_id_idx ON jobs (status, created_at, id);

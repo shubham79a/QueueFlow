@@ -93,11 +93,15 @@ A React app in [web/](web/) that shows the system as it runs. Read-only, no logi
 
 | Page | Shows |
 | --- | --- |
-| **Jobs** | recent jobs with a status filter — queue wait and run time per row, refreshing every 2 s |
-| **Job detail** | one job: payload, attempts, error, all three timestamps, the next retry if it is backing off |
-| **Workers** | every worker from its heartbeat key — alive or gone, TTL counting down, what it is holding. Kill a worker mid-job and watch its row turn red, then empty as the reaper takes over |
-| **DLQ** | jobs that exhausted their attempts, each with its error and a **Replay** button |
+| **Jobs** — `/jobs` | recent jobs with a status filter — queue wait and run time per row, refreshing every 2 s |
+| **Job detail** — `/jobs/<id>` | one job: payload, attempts, error, all three timestamps, the next retry if it is backing off |
+| **Workers** — `/workers` | every worker from its heartbeat key — alive or gone, TTL counting down, what it is holding. Kill a worker mid-job and watch its row turn red, then empty as the reaper takes over |
+| **DLQ** — `/dlq` | jobs that exhausted their attempts, each with its error and a **Replay** button |
 | **Health strip** | in the header: Redis and Postgres up or down, queue depth, jobs by status |
+
+The status filter lives in the URL, so `/jobs?status=dead` is a link you can send someone and the
+back button undoes a filter. It is a query parameter rather than `/jobs/dead` because `/jobs/<id>`
+already means one job, and a path segment could not tell a status from an id.
 
 Signing in with the operator password unlocks the two actions that write: **New job** on the Jobs
 page, and **Replay** in the DLQ. Everything else stays readable signed out — the buttons are shown
@@ -174,12 +178,30 @@ All routes are under `/api`; everything else is the dashboard.
 | `POST /api/jobs` | **write** | Submit work. Returns `202` with the job id |
 | `POST /api/jobs/:id/replay` | **write** | Requeue a dead job. `409` unless it is dead |
 | `GET /api/jobs/:id` | open | Full record: status, attempts, error, timings |
-| `GET /api/jobs?status=&limit=` | open | Recent jobs, newest first |
+| `GET /api/jobs?status=&limit=&cursor=` | open | A page of jobs, newest first |
 | `GET /api/workers` | open | Live workers, heartbeat TTL remaining, and what each is holding |
 | `GET /api/health` | open | Redis and Postgres reachability, pending/delayed depth, status tally |
 | `POST /api/auth/login` | — | Password → session cookie. `401` wrong, `429` throttled |
 | `POST /api/auth/logout` | — | Clears the cookie |
 | `GET /api/auth/me` | open | Whether this browser is signed in, and whether login is configured |
+
+**Paging.** `GET /api/jobs` returns `{ jobs, nextCursor }`. Pass `nextCursor` back as `?cursor=` for
+the next page; `null` means there are no more. The cursor is opaque — do not parse it.
+
+```bash
+curl "http://localhost:4000/api/jobs?limit=20"                 # → { jobs: [...], nextCursor: "eyJ0..." }
+curl "http://localhost:4000/api/jobs?limit=20&cursor=eyJ0..."  # → the next 20
+```
+
+It is a **keyset** cursor, not an offset, and the reason is that this list grows while you read it.
+`OFFSET 20` means "skip twenty positions" — so if four jobs arrive between fetching page one and
+page two, everything shifts down four and page two repeats four rows you have already seen.
+Deletions cause the mirror image: rows skipped silently. A cursor names a *value* — `(created_at,
+id)` — and inserting rows above it cannot move it.
+
+The `id` is in the cursor as a tie-breaker, not as the key. Ids are UUIDv4, so their order has
+nothing to do with insertion order; but two rows can share a `created_at`, and then a cursor of
+`< created_at` drops one while `<=` returns one twice.
 
 **Authentication.** Reading is always open, so the dashboard is viewable by anyone. Writing takes
 either of two proofs, because there are two kinds of caller:
@@ -595,6 +617,7 @@ src/
   api/
     index.ts         HTTP producer; serves the dashboard when web/dist exists
     auth.ts          who may write: API keys, the operator password, the session cookie
+    params.ts        query-parameter validation and the opaque paging cursor
   worker/
     index.ts         consumer loop, handoff, leases, lifecycle transitions
     handlers.ts      job type implementations

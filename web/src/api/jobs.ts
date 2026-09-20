@@ -4,10 +4,23 @@ import type { Job, JobStatus, JobType } from '../types.ts'
 // Every call the UI makes about jobs, in one file. Pages import these by name and
 // never build a URL themselves — so when an endpoint changes, it changes here once.
 
-export function listJobs(status: JobStatus | '' = '', limit = 50): Promise<Job[]> {
+export interface JobPage {
+  jobs: Job[]
+  // Opaque — base64 of the last row's (created_at, id). Pass it back to get the next
+  // page; null means there is no next page. Never parse it: the server is free to
+  // change what is inside, and nothing here should depend on the shape.
+  nextCursor: string | null
+}
+
+export function listJobs(
+  status: JobStatus | '' = '',
+  cursor?: string,
+  limit = 50,
+): Promise<JobPage> {
   const params = new URLSearchParams({ limit: String(limit) })
   if (status) params.set('status', status)
-  return apiFetch<Job[]>(`/jobs?${params}`)
+  if (cursor) params.set('cursor', cursor)
+  return apiFetch<JobPage>(`/jobs?${params}`)
 }
 
 // 404 surfaces as an ApiError with status 404 — the detail page checks for that

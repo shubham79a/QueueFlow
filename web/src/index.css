@@ -147,4 +147,22 @@
   body {
     @apply bg-background text-foreground;
   }
+
+  /* Buttons look clickable again.
+
+     Tailwind v3's Preflight put `cursor: pointer` on buttons; v4 dropped it to match
+     the browser's own default, which is an arrow. So every button in the app — New
+     job, Replay, Load more, the theme toggle — silently stopped signalling that it
+     does anything.
+
+     Here rather than on each component: Radix builds its menus and selects out of
+     divs carrying a role instead of <button>, so the fix has to be by role as well
+     as by tag, and the shadcn files are regenerable — a `cursor-pointer` added to
+     one of them disappears the next time the CLI touches it. */
+  button:not(:disabled),
+  [role='button']:not([aria-disabled='true']),
+  [role='menuitem'],
+  [role='option'] {
+    cursor: pointer;
+  }
 }

@@ -166,7 +166,7 @@ function Section({ title, children }: { title: string; children: React.ReactNode
 function BackLink() {
   return (
     <Link
-      to="/"
+      to="/jobs"
       className="text-muted-foreground hover:text-foreground inline-flex items-center gap-1.5 text-sm"
     >
       <ArrowLeftIcon className="h-4 w-4" />

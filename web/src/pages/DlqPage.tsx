@@ -1,8 +1,8 @@
 import { Link } from 'react-router-dom'
-import { useQuery } from '@tanstack/react-query'
-import { listJobs } from '@/api/jobs'
+import { useJobList } from '@/hooks/useJobList'
 import { shortId, timeAgo } from '@/format'
 import ReplayButton from '@/components/ReplayButton'
+import LoadMore from '@/components/LoadMore'
 import { Card } from '@/components/ui/card'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
@@ -13,11 +13,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@
 // `WHERE status = 'dead'`. A second copy of that fact could disagree with the row
 // holding the error and the timings, so there is only the row.
 export default function DlqPage() {
-  const jobs = useQuery({
-    queryKey: ['jobs', 'dead'],
-    queryFn: () => listJobs('dead'),
-    refetchInterval: 2000,
-  })
+  const jobs = useJobList('dead')
 
   return (
     <div className="space-y-6">
@@ -29,7 +25,7 @@ export default function DlqPage() {
       </div>
 
       {jobs.isError && (
-        <p className="text-destructive text-sm">Could not load the DLQ: {jobs.error.message}</p>
+        <p className="text-destructive text-sm">Could not load the DLQ: {jobs.error?.message}</p>
       )}
 
       <Card className="overflow-hidden p-0">
@@ -55,7 +51,7 @@ export default function DlqPage() {
                   </TableRow>
                 ))}
 
-              {jobs.data?.length === 0 && (
+              {!jobs.isPending && jobs.rows.length === 0 && (
                 <TableRow>
                   <TableCell colSpan={6} className="text-muted-foreground py-10 text-center">
                     Nothing dead. Everything either succeeded or is still trying.
@@ -63,7 +59,7 @@ export default function DlqPage() {
                 </TableRow>
               )}
 
-              {jobs.data?.map((job) => (
+              {jobs.rows.map((job) => (
                 <TableRow key={job.id}>
                   <TableCell>
                     <Link
@@ -96,6 +92,14 @@ export default function DlqPage() {
             </TableBody>
           </Table>
         </div>
+
+        <LoadMore
+          shown={jobs.rows.length}
+          total={jobs.total}
+          hasNextPage={jobs.hasNextPage}
+          isFetching={jobs.isFetchingNextPage}
+          onLoadMore={() => void jobs.fetchNextPage()}
+        />
       </Card>
     </div>
   )
