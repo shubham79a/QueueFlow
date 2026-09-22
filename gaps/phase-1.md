@@ -9,7 +9,7 @@ Written retroactively. Phase 1 was an HTTP producer, a Redis list, and one worke
 | GAP-1.3 | A worker killed mid-job destroyed the job with no trace | partly — see GAP-2.2 |
 | GAP-1.4 | No retries, backoff or dead-letter queue | open — see GAP-2.3 |
 | GAP-1.5 | One job in flight per worker; one worker | open, Phase 3 |
-| GAP-1.6 | No graceful shutdown | open — see GAP-2.6 |
+| GAP-1.6 | No graceful shutdown | **closed** — drain on SIGTERM, four phases later |
 
 ---
 
@@ -48,7 +48,13 @@ copy in existence was a local variable in that process.
 
 ---
 
-## GAP-1.4 · GAP-1.5 · GAP-1.6 — still open
+## GAP-1.4 · GAP-1.5 · GAP-1.6 — all since closed
 
-Carried forward as [GAP-2.3](phase-2.md) (retries), Phase 3 (concurrency), and
+Carried forward as [GAP-2.3](phase-2.md) (retries, closed in Phase 4), Phase 3 (concurrency), and
 [GAP-2.6](phase-2.md) (graceful shutdown).
+
+GAP-1.6 is worth a note on its own: it was filed here, re-filed as GAP-2.6, GAP-3.5 and GAP-5.3, and
+deferred every time. Four entries for one gap, because each phase made it cost more — one job in
+this phase, `CONCURRENCY` jobs once workers ran several at once, `workers × concurrency` once there
+were several workers. It was also the only gap in the whole set that fired on a normal day rather
+than on a failure. The repetition was the signal.

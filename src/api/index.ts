@@ -18,6 +18,7 @@ import {
 import { createLogger } from "../shared/log.js";
 import { createRedis } from "../shared/redis.js";
 import { createDb, query } from "../shared/db.js";
+import { onShutdown } from "../shared/shutdown.js";
 import {
   AUTH_DISABLED,
   KEYS_CONFIGURED,
@@ -461,7 +462,7 @@ if (existsSync(webIndex)) {
   log.info(null, `serving dashboard from ${webDist}`);
 }
 
-app.listen(PORT, () => {
+const server = app.listen(PORT, () => {
   log.info(null, `listening on http://localhost:${PORT}`);
 
   // Open write routes are fine locally and wrong anywhere else. Say so rather than
@@ -489,4 +490,28 @@ app.listen(PORT, () => {
         " Generate one with `npm run key:new`.",
     );
   }
+});
+
+/**
+ * Finish the requests already in progress, refuse new ones, then stop.
+ *
+ * Nothing here takes long — the longest request in this API is a page query — so unlike
+ * the worker there is no real draining, just the difference between a client getting its
+ * response and a client getting a dropped connection. The one that actually mattered
+ * before this: a POST /jobs killed between its INSERT and its LPUSH leaves an orphan the
+ * sweep only finds a minute later, and the caller never learns whether the job was
+ * created, so it submits again.
+ */
+onShutdown(log, async () => {
+  // closeIdleConnections() is not optional here, and leaving it out is the usual reason
+  // a "graceful" HTTP shutdown appears to hang. server.close() stops accepting NEW
+  // connections and then waits for every EXISTING one to end — and the dashboard polls
+  // every 2s over keep-alive, so there is almost always an idle socket held open. Those
+  // sockets have no request on them; closing them costs nobody anything.
+  server.closeIdleConnections();
+
+  await new Promise<void>((resolve) => server.close(() => resolve()));
+
+  await redis.quit().catch(() => redis.disconnect());
+  await db.end().catch(() => undefined);
 });

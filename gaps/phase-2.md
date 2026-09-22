@@ -10,7 +10,7 @@ and a way to observe it — so it is a demonstrable fact rather than a claim.
 | GAP-2.3 | No retry, backoff or dead-letter queue; a failure is terminal | Phase 4 |
 | GAP-2.4 | `job_effects` is written on success only | still open — see GAP-5.1 |
 | GAP-2.5 | `max_attempts` and `idempotency_key` exist but are unused | **closed** — both now used |
-| GAP-2.6 | No graceful shutdown | Phase 7 |
+| GAP-2.6 | No graceful shutdown | **closed** — drain on SIGTERM |
 
 ---
 
@@ -150,14 +150,17 @@ submission — exactly the use it was reserved for.
 
 ---
 
-## GAP-2.6 — No graceful shutdown
+## GAP-2.6 — No graceful shutdown · CLOSED
 
-**What.** `SIGTERM` or `Ctrl+C` kills the worker immediately, including mid-job. Every deploy
-therefore destroys whatever was in flight and leans on recovery machinery that does not exist yet.
+**What.** `SIGTERM` or `Ctrl+C` killed the worker immediately, including mid-job. Every deploy
+therefore destroyed whatever was in flight and leaned on recovery machinery that did not exist yet.
 
-**Why left.** Phase 7. It is a small change — stop taking new work, finish the current job, exit —
-but it is only honest once there is something to fall back on when it fails.
+**Why it waited.** It is a small change — stop taking new work, finish the current job, exit — but
+it is only honest once there is something to fall back on when the drain does not finish. That
+arrived with the reaper.
 
-**How to see it.** `Ctrl+C` a worker mid-job: the row stays `running`, same as GAP-2.2.
+**How it was closed.** `src/shared/shutdown.ts` registers `SIGTERM` and `SIGINT`; the worker stops
+pulling from Redis, waits for its in-flight jobs, deletes its own heartbeat and exits. What did not
+finish in time still falls back to the reaper, which is the fallback this gap was waiting for.
 
-**Closed by.** Phase 7.
+**Closed by.** Graceful shutdown. Same gap as GAP-1.6, GAP-3.5 and GAP-5.3.

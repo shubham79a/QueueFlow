@@ -2,6 +2,7 @@ import { KEYS } from "../shared/keys.js";
 import { createLogger } from "../shared/log.js";
 import { createRedis } from "../shared/redis.js";
 import { createDb, query } from "../shared/db.js";
+import { onShutdown } from "../shared/shutdown.js";
 import { reapDead, sweepOrphans } from "./reaper.js";
 
 // The scheduler.
@@ -125,7 +126,58 @@ async function recoverLostWork(): Promise<void> {
   }
 }
 
+// Set by the shutdown handler, read at the top of the loop below.
+let stopping = false;
+
+// Resolves once the loop has actually left, which the drain waits for before it closes
+// anything. Setting the flag only ASKS the loop to stop; it does not make it so.
+let loopHasExited!: () => void;
+const loopExit = new Promise<void>((resolve) => { loopHasExited = resolve; });
+
+/**
+ * Stop at a pass boundary rather than wherever the signal happened to land.
+ *
+ * Nothing here is long-running — a pass is one bounded batch — so there is no draining to
+ * do, only a place to stop cleanly. What this avoids is dying PART WAY through a promote:
+ * `promoteDue` does ZREM, then UPDATE, then LPUSH, and a process killed between the second
+ * and third leaves a 'queued' row whose id is in no Redis structure at all. Nothing breaks
+ * — sweepOrphans is built for exactly that shape — but the retry fires a minute late for
+ * no reason.
+ *
+ * Worst case this waits out `sleepUntilNextDue`, capped at MAX_SLEEP_MS, so about a
+ * second. Interrupting that sleep would cost more complexity than the second is worth.
+ */
+async function drain(): Promise<void> {
+  stopping = true;
+
+  // WAIT FOR THE PASS TO FINISH BEFORE CLOSING ANYTHING.
+  //
+  // Setting the flag only asks the loop to stop at the top of its next iteration; it does
+  // nothing about the one already running. Closing Redis here instead of waiting would
+  // make whatever command that pass tries next fail — and if it were mid-promote, between
+  // the UPDATE and the LPUSH, that is precisely the half-finished promote described above.
+  // The shutdown would cause the exact problem it exists to avoid.
+  //
+  // Capped, because a drain must never hang on its own bookkeeping. The longest a pass can
+  // take is a reap (a SCAN over the processing lists) or a sleepUntilNextDue, so five
+  // seconds is generous; past that, closing underneath it is no worse than the SIGKILL
+  // that would otherwise be coming.
+  const finished = await Promise.race([
+    loopExit.then(() => true),
+    new Promise<boolean>((r) => setTimeout(() => r(false), 5_000)),
+  ]);
+
+  if (!finished) {
+    log.error(null, "a pass did not finish in time — closing underneath it");
+  }
+
+  await redis.quit().catch(() => redis.disconnect());
+  await db.end().catch(() => undefined);
+}
+
 async function main(): Promise<void> {
+  onShutdown(log, drain);
+
   log.info(
     null,
     `scheduler ${SCHEDULER_ID} up, watching ${KEYS.delayed}` +
@@ -134,7 +186,7 @@ async function main(): Promise<void> {
 
   let nextReapAt = 0;
 
-  while (true) {
+  while (!stopping) {
     const promoted = await promoteDue();
 
     // Time-gated rather than run every pass: the loop above spins as fast as work
@@ -148,6 +200,9 @@ async function main(): Promise<void> {
     // reached about once a second even when the delayed set is empty.
     if (promoted === 0) await sleepUntilNextDue();
   }
+
+  // Nothing is part way through now, so the drain can close Redis and Postgres safely.
+  loopHasExited();
 }
 
 main().catch((err) => {

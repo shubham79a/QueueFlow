@@ -11,8 +11,8 @@ building. Several of the gaps below are the shape of that trade.
 | ID | Gap | Closed by |
 | --- | --- | --- |
 | GAP-5.1 | A duplicate side effect is still possible; only the record is protected | not planned — the receiver's job |
-| GAP-5.2 | Recovery latency is bounded by the heartbeat TTL, not by the failure | not planned — inherent |
-| GAP-5.3 | No graceful shutdown, so every ordinary deploy goes through the reaper | Phase 7 |
+| GAP-5.2 | Recovery latency is bounded by the heartbeat TTL, not by the failure | narrowed — now unplanned death only |
+| GAP-5.3 | No graceful shutdown, so every ordinary deploy goes through the reaper | **closed** — drain on SIGTERM |
 | GAP-5.4 | The orphan sweep reads the whole pending list when it finds candidates | not planned — measured |
 | GAP-5.5 | Two processes sharing a `WORKER_ID` degrade quietly | not planned — documented |
 | GAP-5.6 | The reaper inherits the scheduler's single-point-of-failure problem | not planned — run two |
@@ -68,29 +68,48 @@ docker compose exec redis redis-cli ttl worker:w1:alive
 
 Nothing at all happens until that reaches `-2`.
 
-**If it needed tightening.** A worker being shut down deliberately could `DEL` its own heartbeat on
-`SIGTERM`, making a planned restart recover instantly while leaving the TTL long for real crashes.
-That is most of GAP-5.3.
+**Narrowed since.** This entry suggested that a worker shut down deliberately could `DEL` its own
+heartbeat on `SIGTERM`, making a planned restart instant while leaving the TTL long for real crashes.
+That is now what happens — see GAP-5.3 — so the TTL only bounds recovery from *unplanned* death,
+which is what it was always for. The gap stays open because that is the part which cannot be fixed:
+for a worker that genuinely disappears, the wait is the trade, not a shortcoming.
 
 ---
 
-## GAP-5.3 — No graceful shutdown
+## GAP-5.3 — No graceful shutdown · CLOSED
 
-**What.** `SIGTERM` is not handled. Stopping a worker is the same event as a crash: whatever it was
-holding waits out the heartbeat TTL and is then rescued by the reaper and run again from the start.
+**What.** `SIGTERM` was not handled, so stopping a worker was the same event as a crash: whatever it
+held waited out the heartbeat TTL and was then rescued by the reaper and run again from the start.
 
-**Why left.** It is a different concern from surviving a crash, and doing it properly means stopping
-new work, draining in-flight jobs, releasing the processing list and clearing the heartbeat — which
-is a small phase of its own rather than a footnote to this one. The `Semaphore` already exposes
-`inFlight` for it.
+**Why it mattered more than it sounds.** A deploy restarts every worker at once. With
+`CONCURRENCY=20` across three workers, an ordinary release stranded and re-ran up to sixty jobs —
+through the recovery path built for hardware failure, at the moment the system is least idle.
+Carried over from GAP-1.6, GAP-2.6 and GAP-3.5: four entries for one gap.
 
-**Why it matters more than it sounds.** A deploy restarts every worker at once. With `CONCURRENCY=20`
-across three workers, an ordinary release currently strands and re-runs up to sixty jobs — through
-the recovery path built for hardware failure, at the moment the system is least idle. Carried over
-from GAP-3.5 and GAP-2.6.
+**How it was closed.** `src/shared/shutdown.ts` handles `SIGTERM` and `SIGINT` for all three
+processes. The worker's drain, in order:
 
-**How to see it.** Start a worker, enqueue a 30-second sleep, press `Ctrl+C`, and watch the job spend
-the TTL in limbo before running again from zero.
+1. `blocking.disconnect()` — a flag alone cannot stop the loop, because it is parked inside
+   `BLMOVE ... 0` and nothing else would ever wake it.
+2. **Keep beating while draining.** A worker that stops heartbeating while still holding jobs is a
+   worker the reaper will rob, which would cause the double execution this is meant to prevent.
+3. Wait for `slots.inFlight` to reach zero, capped by `SHUTDOWN_TIMEOUT_MS`.
+4. On a clean drain only, `heartbeat.stop()` and `DEL worker:<id>:alive` — which is what makes a
+   restart instant instead of waiting out `recoverOwnProcessing`'s `TTL_S + 1s`.
+5. On a timeout, deliberately leave the heartbeat alone and let the reaper take over, exactly as
+   before. Work that did not finish is no better off than it was, and no worse.
+
+**The other half of the gap**, which the earlier entries never mentioned: `CMD ["node", ...]` makes
+node PID 1, and Linux ignores signals PID 1 has not explicitly asked for. So `SIGTERM` was not merely
+unhandled, it was *unreceivable* — every `docker compose stop` waited out its full grace period and
+then `SIGKILL`ed. Registering a listener is what makes the signal arrive at all.
+
+**How to see it now.** Start a worker with `CONCURRENCY=3`, enqueue three 5-second sleeps, press
+`Ctrl+C`: all three finish, the worker logs `drained cleanly`, and the scheduler logs no `rescued
+from` line. Then do the same with `kill -9` and watch the reaper do its job — which is the test that
+proves nothing was taken away.
+
+**Closed by.** Graceful shutdown.
 
 ---
 
@@ -200,6 +219,20 @@ says queued, nothing in Redis holds the id, push it back. The design is asymmetr
 *original* failure it was written for is asymmetric — the API crashing between the INSERT and the
 LPUSH only ever produces `queued` rows. Redis vanishing produces all three.
 
+**Why it cannot simply be detected.** Two facts make a missing processing list invisible rather than
+alarming.
+
+First, Redis deletes a key the moment its collection is empty, so `queueflow:processing:w1` blinks in
+and out of existence all day — it exists only while w1 is holding something. "No key for w1" is the
+normal, healthy state of an idle worker, so there is no way to tell a wiped list from an idle one.
+Gone and empty are the same observation, the same way quiet and dead are for the heartbeat.
+
+Second, nothing outside that key name records the association. The `jobs` table has no `worker_id`
+column; `job_effects.worker_id` is only written on success, far too late to help. So "job X is held
+by worker w1" exists in exactly one place in the entire system — the *name* of a Redis key — and that
+is precisely what disappears. The heartbeat survives independently but only ever says that w1 is
+alive, never what it is holding.
+
 **Why left.** Fixing it means the orphan sweep stops asking "is this row queued?" and starts asking
 "does Redis still hold this id?" for `running` and `retrying` rows too. That check is only safe when
 it is *certain* Redis is intact — otherwise a momentary connection failure looks identical to a wipe,
@@ -209,17 +242,45 @@ because nothing is queued" from "empty because this is a different Redis than th
 minute ago". That is a real piece of design, not a patch, and it belongs with the persistence
 decisions rather than bolted on here.
 
-The operational answer in the meantime is the cheaper one: **do not run Redis in a container without a
-volume**, which is why `docker-compose.prod.yml` gives it a named volume and AOF.
+**How likely this is — and what was done about it.** `docker-compose.prod.yml` used to run Redis with
+**no volume and no persistence** (`--save "" --appendonly no`), so an empty Redis was not an incident,
+it was what an ordinary `docker compose down && up` or a host reboot produced. That is now closed off:
+Redis runs with `--appendonly yes` onto a named `redisdata` volume, so a restart replays the AOF and
+the processing lists come back.
 
-**How to see it.**
+That is a **mitigation, not a fix**. Everything below still holds the moment the volume is gone — a
+fresh VM, a deleted volume, a corrupted AOF, or any managed Redis that evicts under memory pressure.
+The gap stays open because the recovery logic is still incapable of noticing, not because restarts
+are still the trigger.
+
+The comment defending the old setting — *Redis is a transport, everything that matters is in
+Postgres* — was the thing that was actually wrong. The rows matter and they are safe, but the
+**pointers that make those rows recoverable** live only in Redis. Losing them leaves the row intact
+in a state nothing will ever act on again, which is worse than losing it outright, because the
+dashboard goes on reporting the job as in progress.
+
+**It takes two things together, not one.** Restarting Redis alone is survivable: the workers
+keep running, their jobs are in-process and never touch Redis, and each one finishes with the fenced
+Postgres write and then an `LREM` against a key that no longer exists — a harmless no-op. What
+strands a job is Redis losing the list *and* the worker not finishing it, which is exactly what a
+full `down`/`up` does, because every container goes at once.
+
+The other way in needs no wipe at all. The retry path writes the row to `retrying`
+(`src/worker/index.ts`) and *then* ZADDs it into the delayed set, two steps that are not atomic. A
+Redis hiccup between them leaves a `retrying` row with nothing scheduled to promote it.
+
+**How to see it.** The AOF has to be out of the way, since the whole point is what happens when Redis
+has no memory of the job. `FLUSHALL` does that whether persistence is on or not — it empties the
+keyspace and the AOF records the emptying.
 
 ```bash
 # a job that will take a while, so it is genuinely mid-flight
 curl.exe -X POST http://localhost:4000/api/jobs -H "Content-Type: application/json" ^
   -d "{\"type\":\"sleep\",\"payload\":{\"ms\":60000}}"
 
-# confirm it is running, then take Redis away underneath it
+# confirm it is running, then kill the worker so nothing will finish the job,
+# and take Redis's memory of it away
+docker compose kill worker
 docker compose exec redis redis-cli FLUSHALL
 ```
 

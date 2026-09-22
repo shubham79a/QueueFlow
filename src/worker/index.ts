@@ -4,6 +4,7 @@ import { createRedis } from "../shared/redis.js";
 import { createDb, query } from "../shared/db.js";
 import { Semaphore } from "../shared/semaphore.js";
 import { startHeartbeat, TTL_S } from "../shared/heartbeat.js";
+import { onShutdown } from "../shared/shutdown.js";
 import { nextDelayMs } from "../shared/retry.js";
 import { hostname } from "node:os";
 import { isUuid, rowToJob, type JobRow } from "../shared/types.js";
@@ -37,6 +38,21 @@ const CONCURRENCY = Math.max(1, Number(process.env.CONCURRENCY ?? 1));
 // matches zero rows and writes nothing.
 
 const FENCING = (process.env.FENCING ?? "on").toLowerCase() !== "off";
+
+// How long a stopping worker waits for its in-flight jobs to finish before giving up.
+//
+// THIS MUST STAY BELOW THE ORCHESTRATOR'S GRACE PERIOD — `stop_grace_period` in compose,
+// `terminationGracePeriodSeconds` in Kubernetes, 10s by default in both. Docker sends
+// SIGTERM, waits that long, then SIGKILLs. If this number is the larger of the two we
+// get killed mid-drain and never reach the cleanup at the end, which is worse than not
+// draining at all: the jobs are stranded anyway AND the heartbeat is left behind, so
+// recovery waits out the full TTL.
+//
+// 25s against the 30s grace period set for the worker in docker-compose.prod.yml.
+const SHUTDOWN_TIMEOUT_MS = Math.max(0, Number(process.env.SHUTDOWN_TIMEOUT_MS ?? 25_000));
+
+// How often the drain re-checks whether the last job has finished.
+const DRAIN_POLL_MS = 100;
 
 const log = createLogger(WORKER_ID);
 
@@ -254,6 +270,22 @@ async function processOne(jobId: string): Promise<void> {
 
 const slots = new Semaphore(CONCURRENCY);
 
+// Set by the shutdown handler. Read at the top of the main loop, and also used to tell
+// a deliberate BLMOVE failure from a real one — see the catch in main().
+let stopping = false;
+
+// Resolves when the main loop has actually left, which the drain waits for before it
+// counts what is in flight.
+//
+// WITHOUT THIS THE COUNT IS WRONG, and wrong in the direction that matters. Slots are
+// acquired BEFORE the BLMOVE, not after — that is the backpressure that stops one worker
+// hoovering up the whole queue. So an idle worker parked on BLMOVE is already holding a
+// slot, and `slots.inFlight` reads 1 with no job running at all. Measuring before the
+// loop has released it reports phantom work, and with a short timeout would report
+// abandoning a job that never existed.
+let loopHasExited!: () => void;
+const loopExit = new Promise<void>((resolve) => { loopHasExited = resolve; });
+
 
 // 1. is there an alive key under MY name?
 //    yes → wait up to TTL+1s for it to expire
@@ -317,6 +349,99 @@ async function recoverOwnProcessing(): Promise<void> {
   log.info(null, `recovered ${moved} job(s) stranded by a previous run of ${WORKER_ID}`);
 }
 
+/**
+ * Stop taking new work, finish what is already in hand, then exit.
+ *
+ * This is the counterpart to the reaper, not a replacement for it. The reaper handles
+ * processes that got no chance to run code; this handles the far commoner case where
+ * something asked the process to stop — a deploy, a restart, Ctrl+C. Until now those
+ * were the same event: the process died mid-job, its ids sat in the processing list,
+ * and the reaper returned them ~35s later to be re-run from zero. At CONCURRENCY=20
+ * across three workers, that is sixty jobs per release going through the path built
+ * for hardware failure.
+ *
+ * THE ORDER HERE IS LOAD-BEARING, in the same way the startup order is.
+ */
+async function drain(): Promise<void> {
+  stopping = true;
+
+  // 1. STOP TAKING NEW WORK/JOBS.
+  // A flag alone cannot do this. The loop is parked inside `BLMOVE ... 0`, which blocks
+  // indefinitely by design — on an idle queue nothing will ever return from it, so the
+  // loop would never come back around to read the flag.
+
+  // disconnect() is what wakes it: ioredis marks the connection as deliberately closed
+  // (so the retryStrategy does NOT reconnect it) and rejects the parked command. The
+  // loop catches that rejection, sees `stopping`, and exits normally.
+  blocking.disconnect();
+
+  // Wait for the loop to actually leave before counting anything, so the slot it was
+  // holding while parked on BLMOVE is not mistaken for a running job.
+  //
+  // The race is not just defensive. The loop has two places it can be waiting, and
+  // disconnect() only wakes one of them: parked on BLMOVE it returns in milliseconds,
+  // but blocked on slots.acquire() — every slot busy, which is exactly when a drain
+  // matters most — it cannot move until a job finishes. In that case it is holding no
+  // slot, so inFlight is already correct and there is nothing to wait for. Hence a cap
+  // rather than an await: at worst this costs a second on a busy worker.
+  await Promise.race([loopExit, new Promise((r) => setTimeout(r, 1_000))]);
+
+  // 2. KEEP BEATING WHILE DRAINING.
+  //
+  // The heartbeat deliberately stays running here. A worker that stops beating while it
+  // is still holding jobs is a worker the reaper will rob — it would hand those jobs to
+  // somebody else while this process is still running them, which is precisely the
+  // double-execution this whole shutdown exists to avoid. The heartbeat stops at step 4,
+  // once there is nothing left to protect.
+
+  // 3. WAIT FOR THE WORK IN HAND.
+  const held = slots.inFlight;
+  if (held > 0) {
+    log.info(null, `draining ${held} job(s) in flight, up to ${SHUTDOWN_TIMEOUT_MS}ms`);
+  }
+
+  const deadline = Date.now() + SHUTDOWN_TIMEOUT_MS;
+  while (slots.inFlight > 0 && Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, DRAIN_POLL_MS));
+  }
+
+  const abandoned = slots.inFlight;
+
+  // 4. CLEAN UP, OR DELIBERATELY DO NOT.
+  if (abandoned === 0) {
+    heartbeat?.stop();
+
+    // DEL rather than letting the key lapse, and this is the part that pays for itself
+    // on every restart. `recoverOwnProcessing` refuses to touch the processing list
+    // while a heartbeat exists under this worker's name, and waits TTL_S + 1s for one to
+    // expire before giving up. Removing the key on a clean exit means the replacement
+    // process starts instantly instead of standing still for half a minute.
+    //
+    // It is only safe BECAUSE the drain finished. There is nothing left in the list for
+    // the reaper to find, so telling the world "this worker is gone" costs nothing.
+    await scheduling.del(KEYS.alive(WORKER_ID));
+
+    if (held > 0) log.info(null, `drained cleanly — ${held} job(s) finished`);
+  } else {
+    // Out of time. Leave the heartbeat alone so it expires on its own, and let the
+    // reaper do exactly what it does today. That is the honest outcome for work that did
+    // not finish: no better than before this change, and no worse either.
+    log.error(
+      null,
+      `gave up with ${abandoned} job(s) still running — leaving them for the reaper.` +
+      ` Raise SHUTDOWN_TIMEOUT_MS (and the orchestrator's grace period with it) if this` +
+      ` is routine.`,
+    );
+  }
+
+  // 5. LET GO OF THE CONNECTIONS. `blocking` is already disconnected above.
+  await scheduling.quit().catch(() => scheduling.disconnect());
+  await db.end().catch(() => undefined);
+}
+
+// Captured so the drain can stop it. Assigned in main(), before any job is taken.
+let heartbeat: { stop(): void } | null = null;
+
 async function main(): Promise<void> {
 
   // THIS ORDER IS LOAD-BEARING.
@@ -329,11 +454,26 @@ async function main(): Promise<void> {
   // stranded jobs, because it would find its own heartbeat and conclude a rival was using its name.
 
   await recoverOwnProcessing();
-  await startHeartbeat(scheduling, WORKER_ID, log);
+  heartbeat = await startHeartbeat(scheduling, WORKER_ID, log);
+
+  // REGISTERED AFTER THE HEARTBEAT, NOT BEFORE, and this ordering is a correctness
+  // matter rather than tidiness.
+  //
+  // The drain ends by deleting worker:<WORKER_ID>:alive, which is only ours to delete
+  // once startHeartbeat has written it. Earlier than this, recoverOwnProcessing may be
+  // sitting out its TTL_S + 1s wait on a key belonging to ANOTHER live process using the
+  // same WORKER_ID — the case GAP-5.5 describes. Draining there would delete that
+  // process's heartbeat, and the reaper would rob a worker that is running perfectly
+  // well.
+  //
+  // The cost is a window during startup where SIGTERM is still ignored, so a stop issued
+  // during recovery waits out the orchestrator's grace period and ends in SIGKILL.
+  // Harmless — nothing is in flight yet, which is exactly why there is nothing to drain.
+  onShutdown(log, drain);
 
   log.info(null, `worker ${WORKER_ID} up, concurrency ${CONCURRENCY}, waiting on ${KEYS.pending}`);
 
-  while (true) {
+  while (!stopping) {
     // Backpressure
     // Acquire a slot BEFORE popping. If we pop first and then acquire, we might pop more jobs
     // than CONCURRENCY because of the await — one worker ends up holding all the jobs, pending
@@ -352,7 +492,30 @@ async function main(): Promise<void> {
     // "RIGHT", "LEFT": take from pending's tail (oldest job, so FIFO order holds) and push onto the
     // head of the processing list. The trailing `0` is the timeout in seconds — 0 means wait forever.
 
-    const jobId = await blocking.blmove(KEYS.pending, PROCESSING, "RIGHT", "LEFT", 0);
+    let jobId: string | null;
+
+    try {
+      jobId = await blocking.blmove(KEYS.pending, PROCESSING, "RIGHT", "LEFT", 0);
+    } catch (err) {
+      slots.release(); // nothing was taken, so the slot is not owed to a job
+
+      // The expected way out. drain() disconnects this connection precisely to break
+      // the block above, so a rejection while stopping is the shutdown working.
+      if (stopping) break;
+
+      // Anything else is real. maxRetriesPerRequest is null and the retryStrategy
+      // reconnects, so a genuine failure here is rare enough to be worth surfacing
+      // rather than swallowing in a tight retry loop.
+      throw err;
+    }
+
+    // A job MAY have been moved into the processing list at the instant the connection
+    // went, with the reply lost on the way back. That id is then in PROCESSING with a row
+    // still saying 'queued', and inFlight never counted it — so the drain will report a
+    // clean exit while one id sits behind. It is safe: this worker's heartbeat is deleted
+    // on a clean exit, so the reaper finds it on its next pass rather than after the TTL,
+    // and recoverOwnProcessing would catch it on restart regardless. The same choice as
+    // everywhere else here — when the outcome is unknown, hold on to the job.
 
     if (jobId === null) {
       slots.release(); // nothing taken, so give the slot straight back
@@ -414,6 +577,10 @@ async function main(): Promise<void> {
       )
       .finally(() => slots.release());
   }
+
+  // The loop is out, so the slot it held while parked on BLMOVE is back. Only now does
+  // slots.inFlight mean "jobs still running", which is what the drain is waiting to read.
+  loopHasExited();
 }
 
 main().catch((err) => {

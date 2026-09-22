@@ -8,7 +8,7 @@ Deliberate omissions. Each says what is missing, why it was left, and how to obs
 | GAP-3.2 | One shared slot pool for all job types; slow jobs starve fast ones | not planned |
 | GAP-3.3 | No rate limiting toward downstream services | not planned |
 | GAP-3.4 | A killed worker now strands up to `CONCURRENCY` jobs, not one | **closed** — handoff + reaper |
-| GAP-3.5 | No graceful shutdown, so a deploy strands `workers × concurrency` jobs | Phase 7 |
+| GAP-3.5 | No graceful shutdown, so a deploy strands `workers × concurrency` jobs | **closed** — drain on SIGTERM |
 | GAP-3.6 | Throughput is capped by Postgres commit rate, not by worker capacity | not planned — measured |
 
 ---
@@ -99,15 +99,21 @@ moments, across eight rounds, and ends with nothing lost.
 
 ---
 
-## GAP-3.5 — No graceful shutdown
+## GAP-3.5 — No graceful shutdown · CLOSED
 
-**What.** `SIGTERM` kills the process immediately, including every in-flight job. With three
-workers at concurrency 20, one deploy strands up to 60 jobs.
+**What.** `SIGTERM` killed the process immediately, including every in-flight job. With three
+workers at concurrency 20, one deploy stranded up to 60 jobs — and this phase is what made the
+number 60 rather than 3. Concurrency multiplied the cost of a gap that already existed.
 
-**Why left.** Phase 7. It is a small change — stop acquiring slots, wait for `slots.inFlight` to
-reach zero, exit — and `Semaphore.inFlight` exists partly for it.
+**How it was closed.** Exactly as this entry guessed: stop acquiring slots, wait for
+`slots.inFlight` to reach zero, exit. `Semaphore.inFlight` did exist partly for it, and its own
+comment said so.
 
-**Closed by.** Phase 7.
+The one thing the guess missed is that a flag is not enough to stop acquiring. The loop parks inside
+`BLMOVE ... 0`, which blocks indefinitely by design, so nothing would ever bring it back around to
+read the flag — the connection has to be disconnected out from under it.
+
+**Closed by.** Graceful shutdown. Same gap as GAP-1.6, GAP-2.6 and GAP-5.3.
 
 ---
 

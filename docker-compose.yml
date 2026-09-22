@@ -12,8 +12,14 @@ services:
     # extreme: you would sometimes recover a queue after a restart and sometimes
     # lose the last few seconds of it, with no way to tell which happened.
     #
-    # Postgres is the durable side of this system. Redis is allowed to be volatile
-    # precisely because nothing is only in Redis.
+    # Postgres is the durable side of this system, and this file keeps Redis volatile
+    # DELIBERATELY — unlike docker-compose.prod.yml, which gives it AOF and a volume.
+    #
+    # Not because nothing is only in Redis: something is. Which worker holds which job
+    # exists solely as the name of a Redis key, so an empty Redis leaves those rows
+    # stuck at 'running' with nothing able to find them. That is GAP-5.8, and a dev
+    # stack that cannot reproduce it is a dev stack you cannot learn from. Restart this
+    # container with a worker mid-job and watch it happen.
     command: ["redis-server", "--save", "", "--appendonly", "no"]
 
     healthcheck:

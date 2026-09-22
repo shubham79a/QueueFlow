@@ -67,7 +67,25 @@ process.stderr.write(`[dev] started ${count} workers, concurrency ${concurrency}
 const shutdown = () => {
   process.stderr.write(`[dev] stopping ${children.length} workers\n`);
   for (const c of children) c.kill("SIGTERM");
-  setTimeout(() => process.exit(0), 500);
+
+  // WAIT FOR THEM, rather than exiting on a fixed timer.
+  //
+  // This used to exit after 500ms, which was fine while SIGTERM killed a worker outright.
+  // Workers now drain their in-flight jobs first, so a fixed 500ms would cut the parent
+  // loose mid-drain and hand the terminal back while N children were still finishing —
+  // the orphaned-process nuisance this handler exists to prevent, just slower to notice.
+  //
+  // The cap is a backstop, not the normal path: a worker's own SHUTDOWN_TIMEOUT_MS
+  // (25s by default) already bounds how long it can take, so reaching this means
+  // something is genuinely stuck.
+  let left = children.length;
+  for (const c of children) c.once("exit", () => { if (--left === 0) process.exit(0); });
+
+  setTimeout(() => {
+    process.stderr.write(`[dev] ${left} worker(s) did not exit — killing\n`);
+    for (const c of children) c.kill("SIGKILL");
+    process.exit(1);
+  }, 30_000).unref();
 };
 
 process.on("SIGINT", shutdown);

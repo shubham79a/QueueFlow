@@ -40,15 +40,43 @@ x-app: &app
   depends_on:
     migrate:
       condition: service_completed_successfully
+    # Redis is named here even though `migrate` already gates startup on Postgres, and
+    # the reason is SHUTDOWN rather than startup. Compose stops a service before the
+    # things it depends on; without this line Redis is not a declared dependency of
+    # anything, so it can be stopped alongside the worker — and a draining worker still
+    # needs Redis for the LREM on each finished job and the final heartbeat DEL. Losing
+    # it mid-drain turns a clean exit into a failed one.
+    redis:
+      condition: service_healthy
 
 services:
   redis:
     image: redis:7.2-alpine
     restart: unless-stopped
-    # Persistence stays off, for the reason in docker-compose.yml: Redis is a
-    # transport, and half-durability is worse than either extreme. Everything that
-    # matters is in Postgres.
-    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    # Persistence is ON here, unlike the dev compose file.
+    #
+    # The argument for leaving it off was that Redis is only a transport and
+    # everything that matters is in Postgres. That is half true. The job rows are in
+    # Postgres and they are safe. But the fact that "worker w1 is holding job X"
+    # exists in exactly one place — the NAME of the key queueflow:processing:w1 —
+    # and the reaper finds stranded jobs by scanning for those key names. No key, no
+    # scan, no rescue: the row sits at 'running' for ever and nothing reports it.
+    #
+    # So an empty Redis does not just lose queued work, it makes in-flight work
+    # invisible. Without this line an ordinary `docker compose down && up` does that.
+    #
+    # AOF rather than --save snapshots because it is written as each command
+    # happens, not at a checkpoint — a crash or a power cut cannot skip it. The cost
+    # is one fsync per second, and at most a second of writes lost, which is harmless
+    # here: a lost LREM leaves a finished id in a processing list and the reaper
+    # discards it after reading the row; a lost LPUSH leaves a 'queued' row that the
+    # orphan sweep pushes back.
+    #
+    # This is a mitigation, not a fix — see GAP-5.8. Losing the volume still strands
+    # the same jobs.
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redisdata:/data
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
@@ -114,6 +142,17 @@ services:
       # falls back to its hostname, which in a container is the container id. So
       # `--scale worker=3` gives three distinct ids with no configuration.
       CONCURRENCY: ${CONCURRENCY:-5}
+      SHUTDOWN_TIMEOUT_MS: ${SHUTDOWN_TIMEOUT_MS:-25000}
+
+    # How long Docker waits after SIGTERM before SIGKILL. THESE TWO NUMBERS MOVE
+    # TOGETHER, and this one must be the larger: the worker uses its window to finish
+    # the jobs it is holding and then delete its heartbeat, and being killed mid-drain
+    # is worse than never draining — the jobs are stranded anyway AND the heartbeat is
+    # left behind, so recovery waits out the full TTL instead of one reap interval.
+    #
+    # Raise both if your handlers legitimately run longer than this. The default 10s
+    # is not enough for a worker holding five jobs.
+    stop_grace_period: 30s
 
   scheduler:
     <<: *app
@@ -123,3 +162,6 @@ services:
 
 volumes:
   pgdata:
+  # Redis's AOF lives here. Without it the file is written inside the container and
+  # deleted along with it, which is persistence that does nothing.
+  redisdata:

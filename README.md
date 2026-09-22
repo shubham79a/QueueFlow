@@ -541,11 +541,10 @@ demonstrates it. In summary:
 - **A duplicate side effect is still possible.** The lease guarantees one *record* per job, not one
   delivery. A worker fenced out at commit time had already sent its request; only the receiver can
   absorb the repeat.
-- **Recovery takes as long as the heartbeat TTL** — up to 30s before a dead worker's jobs move. Safe
-  the whole time, but not moving. Shortening it means robbing healthy workers more often.
-- **No graceful shutdown** — `SIGTERM` is not handled, so an ordinary deploy is indistinguishable
-  from a crash and goes through the reaper. With three workers at `CONCURRENCY=20` that is up to
-  sixty jobs re-run per release.
+- **Recovery from an *unplanned* death takes as long as the heartbeat TTL** — up to 30s before a dead
+  worker's jobs move. Safe the whole time, but not moving. Shortening it means robbing healthy
+  workers more often. A planned stop no longer pays this, since a draining worker deletes its own
+  heartbeat.
 - **Every error is treated as retryable** — a `400` burns all five attempts.
 - **The scheduler is a single point of failure**, and a silent one: it now carries the reaper too, so
   if it stops, neither retries nor crashed jobs come back and nothing reports it. Running two is safe.
@@ -569,13 +568,26 @@ demonstrates it. In summary:
 
 The image is host-agnostic: anything that can run a container and give it three commands will do.
 
-**What it needs.** A Postgres with a persistent volume — it holds every job that ever ran, and
-losing it empties the dashboard. A Redis, which may be volatile: it is a transport, and nothing
-lives only in Redis. Then the three processes.
+**What it needs.** A Postgres with a persistent volume — it holds every job that ever ran, and losing
+it empties the dashboard. A Redis, **also with a volume, and with AOF on**. That second one is not
+obvious and is worth the sentence: Redis holds no job data, but *which worker is holding which job*
+exists only as the name of a Redis key, and the reaper finds stranded jobs by scanning those names.
+An empty Redis does not lose in-flight work so much as make it invisible — the row sits at `running`
+and nothing ever looks at it again. See GAP-5.8; persistence narrows that to losing the volume rather
+than any restart, but does not close it. Then the three processes.
 
 **Before it is reachable from anywhere**, set `API_KEYS` or `ADMIN_PASSWORD` (the API warns loudly
 at startup when neither is set and the write routes are open), `SESSION_SECRET`, and `TRUST_PROXY=1`
 if something terminates TLS in front of it.
+
+**Stopping is graceful, and two settings have to agree.** On `SIGTERM` a worker stops taking new
+jobs, finishes the ones it is holding, deletes its own heartbeat and exits — so an ordinary deploy no
+longer strands work for the reaper. `SHUTDOWN_TIMEOUT_MS` (25 s) is how long it will wait;
+`stop_grace_period` (30 s on the worker in `docker-compose.prod.yml`) is how long the orchestrator
+will. **The orchestrator's number must be the larger of the two**, or the worker is killed mid-drain
+and the jobs are stranded anyway *with* a heartbeat left behind, which is worse than not draining.
+Raise both together if your handlers run long. Anything still unfinished when the timeout hits falls
+back to the reaper exactly as before.
 
 **On a VM** — the simplest always-on option — clone, set `.env`, and
 `docker compose -f docker-compose.prod.yml up -d`. Everything runs as it does locally.
