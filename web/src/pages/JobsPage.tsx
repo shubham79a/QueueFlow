@@ -111,14 +111,17 @@ export default function JobsPage() {
         <div className="overflow-x-auto">
           <Table>
             <TableHeader>
+              {/* Columns drop out as the screen narrows rather than the table
+                  scrolling sideways — a phone keeps what identifies a job (id, type,
+                  status) and sheds the timings, which are the reason to open it. */}
               <TableRow>
                 <TableHead>id</TableHead>
                 <TableHead>type</TableHead>
                 <TableHead>status</TableHead>
-                <TableHead>attempts</TableHead>
-                <TableHead>created</TableHead>
-                <TableHead>waited</TableHead>
-                <TableHead>ran for</TableHead>
+                <TableHead className="hidden sm:table-cell">attempts</TableHead>
+                <TableHead className="hidden md:table-cell">created</TableHead>
+                <TableHead className="hidden lg:table-cell">waited</TableHead>
+                <TableHead className="hidden lg:table-cell">ran for</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -154,16 +157,16 @@ export default function JobsPage() {
                   <TableCell>
                     <StatusBadge status={job.status} />
                   </TableCell>
-                  <TableCell className="text-sm tabular-nums">
+                  <TableCell className="hidden text-sm tabular-nums sm:table-cell">
                     {job.attempts}/{job.maxAttempts}
                   </TableCell>
-                  <TableCell className="text-muted-foreground text-sm">
+                  <TableCell className="text-muted-foreground hidden text-sm md:table-cell">
                     {timeAgo(job.createdAt)}
                   </TableCell>
-                  <TableCell className="font-mono text-xs tabular-nums">
+                  <TableCell className="hidden font-mono text-xs tabular-nums lg:table-cell">
                     {duration(job.createdAt, job.startedAt)}
                   </TableCell>
-                  <TableCell className="font-mono text-xs tabular-nums">
+                  <TableCell className="hidden font-mono text-xs tabular-nums lg:table-cell">
                     {duration(job.startedAt, job.completedAt)}
                   </TableCell>
                 </TableRow>

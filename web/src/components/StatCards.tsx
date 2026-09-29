@@ -12,7 +12,29 @@ import { Skeleton } from '@/components/ui/skeleton'
 export default function StatCards() {
   const health = useQuery({ queryKey: ['health'], queryFn: getHealth, refetchInterval: 5000 })
 
-  if (health.isError) return null
+  // SAY SO RATHER THAN VANISH.
+  //
+  // This used to `return null`, which was survivable when the only caller was the jobs
+  // page — the table underneath reported its own failure. On the landing page these
+  // cards are the whole of a section, so disappearing leaves a heading with nothing
+  // under it, and a first-time visitor reads that as a broken site rather than an
+  // unreachable API. Same choice HealthStrip already makes in the header.
+  //
+  // The wording is careful on purpose: this component talks to the API, and the API is
+  // not the queue. Workers reach Redis and Postgres directly, so failing to load these
+  // numbers means the dashboard cannot SEE the system — not that the system stopped.
+  if (health.isError) {
+    return (
+      <Card className="gap-1 p-4">
+        <span className="text-bad text-sm font-medium">API unreachable</span>
+        <span className="text-muted-foreground text-sm leading-relaxed">
+          These counts come from <code className="font-mono text-xs">/api/health</code>. Workers
+          talk to Redis and Postgres directly, so this says the dashboard cannot reach the
+          server — not that the queue has stopped.
+        </span>
+      </Card>
+    )
+  }
 
   const h = health.data
   const jobs = h?.jobs ?? {}

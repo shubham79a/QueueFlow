@@ -32,11 +32,16 @@ export default function DlqPage() {
         <div className="overflow-x-auto">
           <Table>
             <TableHeader>
+              {/* Columns drop out as the screen narrows, same as the jobs table — but
+                  the priority is different. There, the timings go first because they are
+                  the reason to open a job. Here you came to read the error and press
+                  Replay, so those two survive to the narrowest width and everything
+                  describing the job goes instead. */}
               <TableRow>
                 <TableHead>id</TableHead>
-                <TableHead>type</TableHead>
-                <TableHead>attempts</TableHead>
-                <TableHead>died</TableHead>
+                <TableHead className="hidden sm:table-cell">type</TableHead>
+                <TableHead className="hidden lg:table-cell">attempts</TableHead>
+                <TableHead className="hidden md:table-cell">died</TableHead>
                 <TableHead>last error</TableHead>
                 <TableHead />
               </TableRow>
@@ -69,17 +74,21 @@ export default function DlqPage() {
                       {shortId(job.id)}
                     </Link>
                   </TableCell>
-                  <TableCell className="text-sm">{job.type}</TableCell>
-                  <TableCell className="text-sm tabular-nums">
+                  <TableCell className="hidden text-sm sm:table-cell">{job.type}</TableCell>
+                  <TableCell className="hidden text-sm tabular-nums lg:table-cell">
                     {job.attempts}/{job.maxAttempts}
                   </TableCell>
-                  <TableCell className="text-muted-foreground text-sm">
+                  <TableCell className="text-muted-foreground hidden text-sm md:table-cell">
                     {job.completedAt ? timeAgo(job.completedAt) : ''}
                   </TableCell>
                   {/* Errors get long. One line here with the whole thing in the
-                      tooltip, and the full text on the detail page. */}
+                      tooltip, and the full text on the detail page.
+                      The cap has to be narrower than the viewport or truncate has
+                      nothing to truncate against and the row pushes the table wider
+                      than the screen — max-w-md is 28rem, which is already wider than
+                      a 390px phone. */}
                   <TableCell
-                    className="text-bad max-w-md truncate font-mono text-xs"
+                    className="text-bad max-w-44 truncate font-mono text-xs sm:max-w-xs lg:max-w-md"
                     title={job.lastError ?? ''}
                   >
                     {job.lastError}

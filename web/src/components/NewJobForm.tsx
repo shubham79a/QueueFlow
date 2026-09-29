@@ -100,17 +100,26 @@ export default function NewJobForm({ onDone }: { onDone: () => void }) {
             </Select>
           </div>
 
-          {Object.entries(fields).map(([key, value]) => (
-            <div key={key} className="space-y-1.5">
-              <Label htmlFor={`f-${key}`}>{key}</Label>
-              <Input
-                id={`f-${key}`}
-                value={value}
-                onChange={(e) => set(key, e.target.value)}
-                className={key === 'url' || key === 'message' ? 'w-80' : 'w-32'}
-              />
-            </div>
-          ))}
+          {Object.entries(fields).map(([key, value]) => {
+            // url and message hold free text and get a wide box. w-80 is 20rem — on a
+            // 390px phone, after the page's px-4 and the card's p-4, there are 326px of
+            // room, so a fixed 320px box fits by six pixels and stops fitting at all on
+            // anything narrower. It takes the whole row below sm instead, which is the
+            // right shape for a url anyway.
+            const wide = key === 'url' || key === 'message'
+
+            return (
+              <div key={key} className={`space-y-1.5 ${wide ? 'w-full sm:w-auto' : ''}`}>
+                <Label htmlFor={`f-${key}`}>{key}</Label>
+                <Input
+                  id={`f-${key}`}
+                  value={value}
+                  onChange={(e) => set(key, e.target.value)}
+                  className={wide ? 'w-full sm:w-80' : 'w-32'}
+                />
+              </div>
+            )
+          })}
 
           {showKey && (
             <div className="space-y-1.5">
