@@ -5,9 +5,16 @@ import { createJob, type CreatedJob } from '@/api/jobs'
 import { JOB_TYPES, type JobType } from '@/types'
 import { useAuth } from '@/auth'
 import { Button } from '@/components/ui/button'
-import { Card } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog'
 import {
   Select,
   SelectContent,
@@ -22,6 +29,12 @@ import {
 // "pick a type, press Create". Asking a visitor to hand-write valid JSON means their
 // first experience of the project can be a syntax error.
 //
+// A DIALOG RATHER THAN A CARD IN THE PAGE. It used to open inline above the table,
+// which pushed every row down the moment you pressed New job — so the thing you were
+// about to add work to jumped out from under you, and on a phone the table left the
+// screen entirely. It also had to compete with the table for width, which is why the
+// fields were laid out in a cramped wrapping row.
+//
 // Defaults are chosen to work as-is. The webhook one points at the local test
 // receiver, which is what `npm run dev:receiver` starts.
 const DEFAULTS: Record<JobType, Record<string, string>> = {
@@ -30,7 +43,13 @@ const DEFAULTS: Record<JobType, Record<string, string>> = {
   deliver_webhook: { url: 'http://127.0.0.1:4001/hook', timeoutMs: '10000' },
 }
 
-export default function NewJobForm({ onDone }: { onDone: () => void }) {
+export default function NewJobForm({
+  open,
+  onOpenChange,
+}: {
+  open: boolean
+  onOpenChange: (open: boolean) => void
+}) {
   const qc = useQueryClient()
   const { canWrite } = useAuth()
 
@@ -61,11 +80,14 @@ export default function NewJobForm({ onDone }: { onDone: () => void }) {
       void qc.invalidateQueries({ queryKey: ['health'] })
 
       if (res.deduplicated) {
+        // Deliberately stays open. Nothing was created, so closing would look like
+        // success; leaving it up puts the idempotency key back in front of you, which
+        // is the field that needs changing.
         toast.info('That key was already used — returned the original job, nothing created')
         return
       }
       toast.success('Job created')
-      onDone()
+      onOpenChange(false)
     },
     onError: (err) => toast.error(err.message),
   })
@@ -81,13 +103,31 @@ export default function NewJobForm({ onDone }: { onDone: () => void }) {
   }
 
   return (
-    <Card className="p-4">
-      <form onSubmit={submit} className="space-y-4">
-        <div className="flex flex-wrap items-end gap-4">
-          <div className="space-y-1.5">
-            <Label>type</Label>
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="sm:max-w-lg">
+        <DialogHeader>
+          <DialogTitle>New job</DialogTitle>
+          <DialogDescription>
+            Accepted immediately and run by a worker. The row appears in the table below as
+            soon as it exists.
+          </DialogDescription>
+        </DialogHeader>
+
+        {/* A column, not a wrapping row. Inline in the page the fields had to share
+            width with the table and ended up jammed side by side; a dialog has one
+            job, so each field gets a full line and the same width at every size. */}
+        {/* min-w-0 IS LOad-BEARING, not tidiness.
+            DialogContent is a grid, and a grid item defaults to min-width:auto — it
+            refuses to shrink below the intrinsic width of its content. The payload
+            preview below is one long unbreakable line of JSON, so it set that width and
+            the whole form grew past the dialog's border, taking the inputs and the
+            buttons with it. min-w-0 lets the item shrink and the preview handle its own
+            overflow. */}
+        <form onSubmit={submit} className="min-w-0 space-y-5">
+          <div className="space-y-2.5">
+            <Label htmlFor="f-type">type</Label>
             <Select value={type} onValueChange={(v) => changeType(v as JobType)}>
-              <SelectTrigger className="w-48">
+              <SelectTrigger id="f-type" className="w-full">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
@@ -100,73 +140,71 @@ export default function NewJobForm({ onDone }: { onDone: () => void }) {
             </Select>
           </div>
 
-          {Object.entries(fields).map(([key, value]) => {
-            // url and message hold free text and get a wide box. w-80 is 20rem — on a
-            // 390px phone, after the page's px-4 and the card's p-4, there are 326px of
-            // room, so a fixed 320px box fits by six pixels and stops fitting at all on
-            // anything narrower. It takes the whole row below sm instead, which is the
-            // right shape for a url anyway.
-            const wide = key === 'url' || key === 'message'
+          {Object.entries(fields).map(([key, value]) => (
+            <div key={key} className="space-y-2.5">
+              <Label htmlFor={`f-${key}`}>{key}</Label>
+              <Input
+                id={`f-${key}`}
+                value={value}
+                onChange={(e) => set(key, e.target.value)}
+                className="w-full"
+              />
+            </div>
+          ))}
 
-            return (
-              <div key={key} className={`space-y-1.5 ${wide ? 'w-full sm:w-auto' : ''}`}>
-                <Label htmlFor={`f-${key}`}>{key}</Label>
-                <Input
-                  id={`f-${key}`}
-                  value={value}
-                  onChange={(e) => set(key, e.target.value)}
-                  className={wide ? 'w-full sm:w-80' : 'w-32'}
-                />
-              </div>
-            )
-          })}
-
-          {showKey && (
-            <div className="space-y-1.5">
+          {showKey ? (
+            <div className="space-y-2.5">
               <Label htmlFor="f-idem">Idempotency-Key</Label>
               <Input
                 id="f-idem"
                 value={idempotencyKey}
                 onChange={(e) => setIdempotencyKey(e.target.value)}
                 placeholder="order-4471"
-                className="w-44"
+                className="w-full"
               />
+              <p className="text-muted-foreground text-xs">
+                Send the same key twice and the second request returns the first job instead
+                of creating another.
+              </p>
             </div>
-          )}
-        </div>
-
-        <div className="flex flex-wrap items-center gap-3">
-          <Button type="submit" size="sm" disabled={!canWrite || create.isPending}>
-            {create.isPending ? 'creating…' : 'Create'}
-          </Button>
-          <Button type="button" variant="ghost" size="sm" onClick={onDone}>
-            Cancel
-          </Button>
-          {!showKey && (
+          ) : (
             <Button
               type="button"
               variant="link"
               size="sm"
-              className="text-muted-foreground"
+              className="text-muted-foreground h-auto p-0"
               onClick={() => setShowKey(true)}
             >
               + idempotency key
             </Button>
           )}
 
-          {!canWrite && (
-            <span className="text-muted-foreground text-xs">sign in to create jobs</span>
-          )}
-          {invalid && <span className="text-destructive text-xs">{invalid}</span>}
-        </div>
+          {/* What actually goes over the wire. It makes the form self-explanatory
+              rather than magic, and it is the same body the curl examples send. */}
+          {/* Wraps rather than scrolls. A horizontal scrollbar inside a 512px dialog is
+              fiddly to use and hides the end of the line, which is where the payload
+              you just edited actually is. break-all because a url has no spaces to
+              break on. */}
+          <pre className="bg-muted text-muted-foreground rounded-md p-3 font-mono text-xs leading-relaxed break-all whitespace-pre-wrap">
+            POST /api/jobs {JSON.stringify({ type, payload })}
+          </pre>
 
-        {/* What actually goes over the wire. It makes the form self-explanatory
-            rather than magic, and it is the same body the curl examples send. */}
-        <pre className="bg-muted text-muted-foreground overflow-x-auto rounded-md p-3 font-mono text-xs">
-          POST /api/jobs {JSON.stringify({ type, payload })}
-        </pre>
-      </form>
-    </Card>
+          {invalid && <p className="text-destructive text-sm">{invalid}</p>}
+          {!canWrite && (
+            <p className="text-muted-foreground text-sm">Sign in to create jobs.</p>
+          )}
+
+          <DialogFooter>
+            <Button type="button" variant="ghost" onClick={() => onOpenChange(false)}>
+              Cancel
+            </Button>
+            <Button type="submit" disabled={!canWrite || create.isPending}>
+              {create.isPending ? 'Creating…' : 'Create job'}
+            </Button>
+          </DialogFooter>
+        </form>
+      </DialogContent>
+    </Dialog>
   )
 }
 

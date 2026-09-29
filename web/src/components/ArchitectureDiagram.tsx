@@ -95,9 +95,13 @@ export default function ArchitectureDiagram() {
           <Edge d="M 798 194 V 290" />
           <EdgeLabel x={798} y={248} text="refreshes TTL" />
 
-          {/* processing → delayed, on failure */}
+          {/* processing → delayed, on failure.
+              The label names the WORKER because the arrow cannot. It is drawn between
+              two Redis structures, like BLMOVE above it, so without the actor a reader
+              reads it as another Redis-to-Redis operation — but Redis does not move
+              anything here. The worker writes the row, then ZADDs the id. */}
           <Edge d="M 541 194 V 290" />
-          <EdgeLabel x={541} y={248} text="ZADD on failure" />
+          <EdgeLabel x={541} y={248} text="worker ZADDs on failure" />
 
           {/* delayed → scheduler */}
           <Edge d="M 440 318 H 382" />

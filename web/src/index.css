@@ -205,11 +205,24 @@
     /* A brighter top edge is what sells the illusion — real frosted glass catches the
        light where it turns. Without it a translucent box just looks faded. */
     border-color: color-mix(in oklch, var(--foreground) 10%, transparent);
+
+    /* THE SHADOW IS DOING THE WORK IN LIGHT MODE, and it has to.
+       --card and --background are both oklch(1 0 0) here — the card fill and the page
+       fill are the same pure white, so fill cannot separate them and a 10% border is
+       the only edge. That reads as text floating on a page rather than as cards. Two
+       shadows: a tight one for the edge, a wide soft one for the lift. */
+    box-shadow:
+      0 1px 2px oklch(0 0 0 / 5%),
+      0 12px 32px -20px oklch(0 0 0 / 18%);
   }
 
   .dark .glass {
     background-color: color-mix(in oklch, var(--card) 55%, transparent);
     border-color: color-mix(in oklch, var(--foreground) 14%, transparent);
+    /* Nearly nothing on dark. A card there is LIGHTER than the page behind it, so the
+       fill already separates them and the border is visible — a drop shadow on a dark
+       surface only muddies the edge it is meant to define. */
+    box-shadow: 0 1px 2px oklch(0 0 0 / 30%);
   }
 
   /* Safari before 18 and Firefox with backdrop-filter disabled both fall through to a
@@ -234,10 +247,20 @@
       transform 180ms ease;
   }
 
+  /* Has to out-shadow the resting state above, or hovering a card makes it look like
+     it settled rather than rose. */
   .lift:hover {
     transform: translateY(-2px);
-    border-color: color-mix(in oklch, var(--primary) 35%, transparent);
-    box-shadow: 0 8px 24px -12px color-mix(in oklch, var(--foreground) 30%, transparent);
+    border-color: color-mix(in oklch, var(--primary) 40%, transparent);
+    box-shadow:
+      0 1px 2px oklch(0 0 0 / 6%),
+      0 16px 40px -20px oklch(0 0 0 / 28%);
+  }
+
+  .dark .lift:hover {
+    box-shadow:
+      0 1px 2px oklch(0 0 0 / 40%),
+      0 16px 40px -24px oklch(0 0 0 / 70%);
   }
 
   /* Movement is the part people get motion sickness from, so it is the part that goes.

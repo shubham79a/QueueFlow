@@ -56,8 +56,9 @@ export default function JobsPage() {
     setParams(params)
   }
 
-  // The form lives here rather than on its own route so a new job appears in the
-  // table below the moment it is created — that is the whole demo.
+  // A dialog rather than its own route, so a new job appears in the table behind it
+  // the moment it is created — that is the whole demo, and a route would navigate
+  // away from the thing worth watching.
   const [creating, setCreating] = useState(false)
 
   const jobs = useJobList(status)
@@ -92,16 +93,17 @@ export default function JobsPage() {
             </SelectContent>
           </Select>
 
-          {!creating && (
-            <Button size="sm" onClick={() => setCreating(true)}>
-              <PlusIcon className="h-4 w-4" />
-              New job
-            </Button>
-          )}
+          {/* Always shown now. It used to hide itself while the inline form was open,
+              because the form WAS the page's answer to pressing it; a dialog leaves the
+              button where your eye last saw it. */}
+          <Button size="sm" onClick={() => setCreating(true)}>
+            <PlusIcon className="h-4 w-4" />
+            New job
+          </Button>
         </div>
       </div>
 
-      {creating && <NewJobForm onDone={() => setCreating(false)} />}
+      <NewJobForm open={creating} onOpenChange={setCreating} />
 
       {jobs.isError && (
         <p className="text-destructive text-sm">Could not load jobs: {jobs.error?.message}</p>

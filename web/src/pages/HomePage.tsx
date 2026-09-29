@@ -43,7 +43,15 @@ export default function HomePage() {
     // is prose and cards, and the same width makes a three-card row 415px wide for two
     // sentences of text. 5xl brings that to about 330px, which is the shape a short
     // paragraph actually wants.
-    <div className="mx-auto max-w-5xl space-y-12 py-6 sm:py-10">
+    // max-w-4xl, not 5xl. The hero text is capped at max-w-2xl for readability, so a
+    // wider column leaves a growing strip of nothing to its right while the card rows
+    // below run the full width — the eye reads that as the page being lopsided rather
+    // than as deliberate left alignment. 4xl keeps the text block and the card rows
+    // close enough in width to look like one column.
+    //
+    // py is small because <main> already applies py-6. The two were stacking to 64px of
+    // empty band under the header before anything appeared.
+    <div className="mx-auto max-w-4xl space-y-12 py-2 sm:py-6">
       {/* ---- hero, and the live numbers directly under it ----
 
           These are one block on purpose, with a smaller gap between them than between
@@ -193,7 +201,7 @@ function SectionHeading({ title, note }: { title: string; note: string }) {
   return (
     <div className="mb-5">
       <div
-        className="from-primary mb-3 h-px w-8 bg-linear-to-r to-transparent"
+        className="from-primary mb-3 h-0.5 w-10 rounded-full bg-linear-to-r to-transparent"
         aria-hidden="true"
       />
       <h2 className="text-xl font-semibold tracking-tight">{title}</h2>
