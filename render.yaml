@@ -1,0 +1,116 @@
+# Render blueprint — a free-tier deployment, with its limits stated.
+#
+# THIS IS NOT THE DEPLOYMENT THIS PROJECT IS DESIGNED FOR. docker-compose.prod.yml is:
+# three services, a scalable worker pool, a Redis with a volume. Render's free tier
+# sells none of that, so this trades the architecture down to fit inside one web
+# service, on purpose, to get a public URL somebody can click.
+#
+# What you are giving up, all of it load-bearing somewhere:
+#
+#   NO BACKGROUND WORKERS on the free plan, so the API, the worker and the scheduler
+#   share one container. src/start.ts runs all three. `--scale worker=3` is gone.
+#
+#   THE SERVICE SLEEPS after 15 minutes with no HTTP traffic, and wakes in about a
+#   minute. A sleeping worker is a queue that does not drain — jobs sit in Redis until
+#   somebody loads the page. Nothing is lost; it just stops moving. For a demo that is
+#   survivable, and arguably a decent illustration of backpressure.
+#
+#   FREE KEY VALUE HAS NO PERSISTENCE, and Render restarts those instances whenever it
+#   likes. That is GAP-5.8 firing on somebody else's schedule: every `running` and
+#   `retrying` job at that instant is stranded, with no volume to attach because
+#   persistence is a paid feature. The dashboard will go on reporting them as in
+#   progress for ever. This is the one real problem left, and it is accepted rather
+#   than solved — the alternatives either meter commands (see REDIS_URL below) or are
+#   no more durable.
+#
+# What is NOT on the list, because it was designed out rather than lived with: Render's
+# free Postgres is deleted after 30 days, so Postgres is not Render's. It is external,
+# and the job history survives.
+#
+# This file is a stopgap and not the answer. The VM route in the README runs
+# docker-compose.prod.yml unchanged, with three services, a scalable worker pool and a
+# Redis that keeps its data, and has none of the above.
+
+services:
+  # The queue itself. Free instances are not reachable from outside Render, which is
+  # what you want — nothing but the web service should be able to reach it.
+  - type: keyvalue
+    name: queueflow-kv
+    plan: free
+    region: singapore
+    ipAllowList: []
+
+  - type: web
+    name: queueflow
+    runtime: docker
+    plan: free
+    region: singapore
+    dockerfilePath: ./Dockerfile
+
+    # Overrides the image's CMD, which starts the API alone. src/start.ts runs the
+    # migration and then all three roles, and forwards SIGTERM so the graceful drain
+    # still happens when Render puts the service to sleep.
+    dockerCommand: node dist/start.js
+
+    # Render sets PORT itself and the API already reads it; this only makes the health
+    # check look somewhere sensible.
+    healthCheckPath: /api/health
+
+    envVars:
+      # POSTGRES IS NOT RENDER'S, and this is the one deliberate departure from
+      # "everything on one platform".
+      #
+      # Render's free Postgres is deleted 30 days after creation, with a 14-day grace
+      # period. That is fine for a weekend experiment and wrong for a link on a CV —
+      # deploy in October and it is gone by mid-November, during the months it most
+      # needs to work. An external free Postgres (Neon, Supabase) does not expire.
+      #
+      # Paste Neon's connection string into the Render dashboard. It already ends in
+      # ?sslmode=require, which pg 8.23 parses and enforces with full certificate
+      # verification — no code change and no ssl:{} object needed. The local Docker
+      # Postgres has no certificate and no sslmode in its URL, so it keeps working
+      # unchanged.
+      - key: DATABASE_URL
+        sync: false
+
+      # Redis IS Render's, by reference so a rotated credential does not need this
+      # file edited.
+      #
+      # Chosen over Upstash for one concrete reason: Upstash bills per command and
+      # gives 500k a month free. Idle — no jobs, nobody watching — this system issues
+      # about 138 commands a minute, roughly 6 million a month, from the scheduler's
+      # 1s poll, the 5s reaper and the 10s heartbeat. That is the free tier gone in
+      # two and a half days. Render's Key Value does not meter commands.
+      - key: REDIS_URL
+        fromService:
+          type: keyvalue
+          name: queueflow-kv
+          property: connectionString
+
+      # Generated once by Render and then held. SESSION_SECRET signing keys must not
+      # change between restarts or every operator session dies on each deploy.
+      - key: SESSION_SECRET
+        generateValue: true
+
+      # The one value you set by hand, in the dashboard, after the first deploy.
+      # WITHOUT IT THE WRITE ROUTES ARE OPEN TO EVERYONE — the API logs a loud warning
+      # at startup when neither this nor API_KEYS is set, and on a public URL that
+      # warning is the difference between a demo and a form anybody can post jobs to.
+      - key: ADMIN_PASSWORD
+        sync: false
+
+      - key: NODE_ENV
+        value: production
+
+      # One process is now doing everything on a shared 0.1 CPU. The default of 1 is
+      # right here; raising it makes the worker compete with the API for the same
+      # event loop rather than getting more done.
+      - key: CONCURRENCY
+        value: "1"
+
+      # Below Render's SIGKILL deadline, so the drain finishes on its own terms.
+      - key: SHUTDOWN_TIMEOUT_MS
+        value: "20000"
+
+# No `databases:` block on purpose — see the DATABASE_URL note above. Postgres lives
+# on Neon so that it outlives Render's 30-day free-tier expiry.
