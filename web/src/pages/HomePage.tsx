@@ -36,41 +36,71 @@ const MEASURED = [
 
 export default function HomePage() {
   return (
-    <div className="space-y-16 py-8 sm:py-12">
-      {/* ---- hero ---- */}
-      <section className="max-w-3xl">
-        <h1 className="text-4xl font-semibold tracking-tight sm:text-5xl">QueueFlow</h1>
-        <p className="text-muted-foreground mt-4 text-base leading-relaxed sm:text-lg">
-          A distributed background job queue built directly on Redis primitives — no BullMQ, no
-          Bee-Queue. An HTTP API accepts work and returns immediately; separate worker processes run
-          it. <span className="text-foreground">Kill a worker mid-job and the job comes back on its own.</span>
-        </p>
+    // NARROWER THAN THE OPERATOR VIEWS, and deliberately so.
+    //
+    // The shell caps at max-w-7xl because the jobs table has seven columns and the DLQ
+    // shows error strings that want every pixel — width earns its keep there. This page
+    // is prose and cards, and the same width makes a three-card row 415px wide for two
+    // sentences of text. 5xl brings that to about 330px, which is the shape a short
+    // paragraph actually wants.
+    <div className="mx-auto max-w-5xl space-y-12 py-6 sm:py-10">
+      {/* ---- hero, and the live numbers directly under it ----
 
-        <div className="mt-7 flex flex-wrap gap-3">
-          <Button asChild>
-            <Link to="/jobs">
-              Open the dashboard
-              <ArrowRightIcon className="h-4 w-4" />
-            </Link>
-          </Button>
-          <Button asChild variant="outline">
-            <a href={REPO} target="_blank" rel="noreferrer">
-              <GithubMark />
-              Source
-            </a>
-          </Button>
+          These are one block on purpose, with a smaller gap between them than between
+          the sections below. The pitch claims something; the numbers are the claim
+          being true right now, a few centimetres away. Separated by a full section
+          gap they were a screen apart, so the first thing a visitor saw was a
+          paragraph and two buttons — and the most convincing thing on the page was
+          below the fold. */}
+      <section className="space-y-8">
+        <div className="max-w-2xl">
+          {/* An eyebrow, doing one job: saying that the numbers further down are not
+              decoration. Everything else on a landing page is a claim about the past;
+              this says the thing is running while you read about it. */}
+          <span className="text-muted-foreground border-border/70 mb-5 inline-flex items-center gap-2 rounded-full border px-3 py-1 text-xs">
+            <span className="bg-ok h-1.5 w-1.5 animate-pulse rounded-full" />
+            live — this page is reading the running system
+          </span>
+
+          <h1 className="wordmark text-4xl font-semibold tracking-tight sm:text-5xl">QueueFlow</h1>
+          {/* max-w-2xl rather than 3xl: at text-lg that is about 70 characters a line,
+              which is the range prose is comfortable to read in. 3xl ran to nearly 90
+              and the eye loses its place coming back to the left margin. */}
+          <p className="text-muted-foreground mt-4 text-base leading-relaxed sm:text-lg">
+            A distributed background job queue built directly on Redis primitives — no BullMQ, no
+            Bee-Queue. An HTTP API accepts work and returns immediately; separate worker processes
+            run it.{' '}
+            <span className="text-foreground">
+              Kill a worker mid-job and the job comes back on its own.
+            </span>
+          </p>
+
+          <div className="mt-7 flex flex-wrap gap-3">
+            <Button asChild>
+              <Link to="/jobs">
+                Open the dashboard
+                <ArrowRightIcon className="h-4 w-4" />
+              </Link>
+            </Button>
+            <Button asChild variant="outline">
+              <a href={REPO} target="_blank" rel="noreferrer">
+                <GithubMark />
+                Source
+              </a>
+            </Button>
+          </div>
         </div>
-      </section>
 
-      {/* ---- what it is doing right now ----
-          The same component the operator view uses. A landing page that shows live
-          numbers is making a claim it can be checked on, which is the point. */}
-      <section>
-        <SectionHeading
-          title="Right now"
-          note="live from /api/health — Redis queue depths and the Postgres status tally"
-        />
-        <StatCards />
+        {/* The same component the operator view uses. A landing page showing live
+            numbers is making a claim that can be checked, which is the point — so it
+            reads from /api/health rather than from anything written here. */}
+        <div>
+          <p className="text-muted-foreground mb-3 text-sm">
+            Live from <code className="font-mono text-xs">/api/health</code> — Redis queue depths
+            and the Postgres status tally, refreshed every five seconds.
+          </p>
+          <StatCards />
+        </div>
       </section>
 
       {/* ---- how it works ---- */}
@@ -79,7 +109,7 @@ export default function HomePage() {
           title="How it works"
           note="the whole system — two stores, and what each one is for"
         />
-        <Card className="p-4 sm:p-6">
+        <Card className="glass p-4 sm:p-6">
           <ArchitectureDiagram />
         </Card>
 
@@ -97,7 +127,7 @@ export default function HomePage() {
         <SectionHeading title="What makes it hard" note="and the mechanism behind each claim" />
         <div className="grid gap-4 md:grid-cols-3">
           {GUARANTEES.map((g) => (
-            <Card key={g.title} className="gap-2 p-5">
+            <Card key={g.title} className="glass lift gap-2 p-5">
               <h3 className="font-medium">{g.title}</h3>
               <p className="text-muted-foreground text-sm leading-relaxed">{g.body}</p>
             </Card>
@@ -110,7 +140,7 @@ export default function HomePage() {
         <SectionHeading title="Measured" note="npm run bench, and test/chaos.test.ts" />
         <div className="grid gap-4 sm:grid-cols-3">
           {MEASURED.map((m) => (
-            <Card key={m.unit} className="gap-1 p-5">
+            <Card key={m.unit} className="glass lift gap-1 p-5">
               <div className="flex items-baseline gap-2">
                 <span className="text-3xl font-semibold tabular-nums">{m.value}</span>
                 <span className="text-muted-foreground text-sm">{m.unit}</span>
@@ -119,10 +149,24 @@ export default function HomePage() {
             </Card>
           ))}
         </div>
-        <p className="text-muted-foreground mt-6 max-w-3xl text-sm leading-relaxed">
+        <p className="text-muted-foreground mt-6 max-w-2xl text-sm leading-relaxed">
           Throughput plateaus near 1,000 jobs/s, and the dependency benchmarks say why: three durable
-          Postgres writes per job put the ceiling around 1,197. Adding workers past that produces more
-          in-flight jobs and longer queue waits, not more completed work.
+          Postgres writes per job put the ceiling around 1,197. Adding workers past that produces
+          more in-flight jobs and longer queue waits, not more completed work.
+        </p>
+      </section>
+
+      {/* ---- a closing thought ----
+
+          The links that used to sit here moved to the app-wide footer, which appears
+          below this on every page — repeating them would put two link rows within a
+          few centimetres of each other. What is left is the part only this page wants
+          to say: why the thing exists at all. */}
+      <section>
+        <p className="text-muted-foreground max-w-2xl text-sm leading-relaxed">
+          Built to understand the problem rather than to avoid it — the interesting parts of a queue
+          are the ones a library hides. Every deliberate omission is written down in{' '}
+          <code className="font-mono text-xs">gaps/</code>, with a reason and a way to reproduce it.
         </p>
       </section>
     </div>
@@ -139,9 +183,19 @@ function GithubMark() {
   )
 }
 
+// A short accent rule above each heading, fading out to the right.
+//
+// The sections were separated by whitespace alone, which on a long page makes them
+// blur into one column of text. A 2rem mark costs nothing, gives the eye something to
+// land on while scrolling, and is the only place on this page that uses the primary
+// colour — so it reads as structure rather than decoration.
 function SectionHeading({ title, note }: { title: string; note: string }) {
   return (
     <div className="mb-5">
+      <div
+        className="from-primary mb-3 h-px w-8 bg-linear-to-r to-transparent"
+        aria-hidden="true"
+      />
       <h2 className="text-xl font-semibold tracking-tight">{title}</h2>
       <p className="text-muted-foreground mt-1 text-sm">{note}</p>
     </div>

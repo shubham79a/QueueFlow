@@ -14,6 +14,7 @@
     "dev:receiver": "tsx watch --env-file=.env src/receiver/index.ts",
     "dev:scheduler": "tsx watch --env-file=.env src/scheduler/index.ts",
     "dev:workers": "tsx --env-file=.env src/dev/workers.ts",
+    "seed": "tsx --env-file=.env src/dev/seed.ts",
     "dev:web": "npm --prefix web run dev",
     "test": "vitest run",
     "bench": "tsx --env-file=.env src/dev/bench.ts",
