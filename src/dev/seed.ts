@@ -68,23 +68,44 @@ const redis = new Redis(REDIS_URL, { maxRetriesPerRequest: 3 });
  */
 const FAILURE_SHAPES = `
   SELECT type, payload, last_error FROM (VALUES
-    (1, 'deliver_webhook',
-        '{"url":"http://127.0.0.1:9999/nowhere"}'::jsonb,
-        'http://127.0.0.1:9999/nowhere unreachable after 3ms: fetch failed: ECONNREFUSED'),
-    (2, 'always_fail',
-        '{"message":"receiver config is wrong"}'::jsonb,
-        'always_fail: receiver config is wrong'),
-    (3, 'deliver_webhook',
-        '{"url":"http://127.0.0.1:4001/hook/down"}'::jsonb,
-        'http://127.0.0.1:4001/hook/down responded 500 after 12ms: {"error":"simulated outage"}'),
-    (4, 'deliver_webhook',
-        '{"url":"http://127.0.0.1:4001/hook/slow","timeoutMs":2000}'::jsonb,
-        'http://127.0.0.1:4001/hook/slow timed out after 2000ms: The operation was aborted'),
-    (5, 'deliver_webhook',
-        '{"url":"http://127.0.0.1:4001/hook"}'::jsonb,
-        'http://127.0.0.1:4001/hook responded 422 after 8ms: {"error":"payload missing customer_id"}')
+    (1,  'deliver_webhook',
+         '{"url":"https://hooks.acme-billing.com/v1/invoices","body":{"invoice_id":"inv_8841","amount_cents":24900}}'::jsonb,
+         'https://hooks.acme-billing.com/v1/invoices unreachable after 41ms: fetch failed: ECONNREFUSED'),
+    (2,  'always_fail',
+         '{"message":"receiver config is wrong"}'::jsonb,
+         'always_fail: receiver config is wrong'),
+    (3,  'deliver_webhook',
+         '{"url":"https://api.shipping-partner.io/webhooks/dispatch","body":{"order_id":4471,"carrier":"bluedart"}}'::jsonb,
+         'https://api.shipping-partner.io/webhooks/dispatch responded 503 after 1204ms: {"error":"upstream unavailable","retry_after":30}'),
+    (4,  'deliver_webhook',
+         '{"url":"https://hooks.acme-billing.com/v1/refunds","timeoutMs":2000,"body":{"refund_id":"rf_207"}}'::jsonb,
+         'https://hooks.acme-billing.com/v1/refunds timed out after 2000ms: The operation was aborted'),
+    (5,  'deliver_webhook',
+         '{"url":"https://notify.internal.acme.dev/events","body":{"event":"order.created","order_id":5120}}'::jsonb,
+         'https://notify.internal.acme.dev/events responded 422 after 87ms: {"error":"payload missing customer_id"}'),
+    (6,  'deliver_webhook',
+         '{"url":"https://api.shipping-partner.io/webhooks/dispatch","body":{"order_id":4498,"carrier":"delhivery"}}'::jsonb,
+         'https://api.shipping-partner.io/webhooks/dispatch responded 500 after 318ms: {"error":"internal error","trace":"7f2a91"}'),
+    (7,  'always_fail',
+         '{"message":"downstream contract changed — field customer_ref removed"}'::jsonb,
+         'always_fail: downstream contract changed — field customer_ref removed'),
+    (8,  'deliver_webhook',
+         '{"url":"https://hooks.acme-billing.com/v1/invoices","body":{"invoice_id":"inv_9013","amount_cents":118000}}'::jsonb,
+         'https://hooks.acme-billing.com/v1/invoices responded 429 after 63ms: {"error":"rate limited","retry_after":60}'),
+    (9,  'deliver_webhook',
+         '{"url":"https://notify.internal.acme.dev/events","timeoutMs":5000,"body":{"event":"user.suspended","user_id":882}}'::jsonb,
+         'https://notify.internal.acme.dev/events timed out after 5000ms: The operation was aborted'),
+    (10, 'deliver_webhook',
+         '{"url":"https://api.shipping-partner.io/webhooks/label","body":{"order_id":4512,"weight_g":1840}}'::jsonb,
+         'https://api.shipping-partner.io/webhooks/label unreachable after 9ms: fetch failed: ENOTFOUND'),
+    (11, 'deliver_webhook',
+         '{"url":"https://hooks.acme-billing.com/v1/invoices","body":{"invoice_id":"inv_9102","amount_cents":7350}}'::jsonb,
+         'https://hooks.acme-billing.com/v1/invoices responded 401 after 52ms: {"error":"signing key rotated"}'),
+    (12, 'deliver_webhook',
+         '{"url":"https://notify.internal.acme.dev/events","body":{"event":"invoice.settled","invoice_id":"inv_8712"}}'::jsonb,
+         'https://notify.internal.acme.dev/events responded 502 after 2417ms: <html>502 Bad Gateway</html>')
   ) AS f(n, type, payload, last_error)
-  WHERE n = 1 + (i % 5)
+  WHERE n = 1 + (i % 12)
 `;
 
 /**
@@ -97,12 +118,22 @@ const FAILURE_SHAPES = `
  */
 const SUCCESS_SHAPES = `
   SELECT type, payload FROM (VALUES
-    (1, 'sleep',            '{"ms":900}'::jsonb),
-    (2, 'deliver_webhook',  '{"url":"http://127.0.0.1:4001/hook","timeoutMs":10000}'::jsonb),
-    (3, 'sleep',            '{"ms":2400}'::jsonb),
-    (4, 'deliver_webhook',  '{"url":"http://127.0.0.1:4001/hook/idempotent"}'::jsonb)
+    (1,  'deliver_webhook', '{"url":"https://hooks.acme-billing.com/v1/invoices","body":{"invoice_id":"inv_7204","amount_cents":15900}}'::jsonb),
+    (2,  'sleep',           '{"ms":900}'::jsonb),
+    (3,  'deliver_webhook', '{"url":"https://api.shipping-partner.io/webhooks/dispatch","body":{"order_id":3907,"carrier":"bluedart"}}'::jsonb),
+    (4,  'sleep',           '{"ms":2400}'::jsonb),
+    (5,  'deliver_webhook', '{"url":"https://notify.internal.acme.dev/events","body":{"event":"order.created","order_id":3912}}'::jsonb),
+    (6,  'sleep',           '{"ms":450}'::jsonb),
+    (7,  'deliver_webhook', '{"url":"https://hooks.acme-billing.com/v1/receipts","timeoutMs":10000,"body":{"receipt_id":"rc_1180"}}'::jsonb),
+    (8,  'sleep',           '{"ms":6000}'::jsonb),
+    (9,  'deliver_webhook', '{"url":"https://api.shipping-partner.io/webhooks/label","body":{"order_id":3944,"weight_g":620}}'::jsonb),
+    (10, 'sleep',           '{"ms":1500}'::jsonb),
+    (11, 'deliver_webhook', '{"url":"https://notify.internal.acme.dev/events","body":{"event":"user.verified","user_id":1407}}'::jsonb),
+    (12, 'sleep',           '{"ms":3200}'::jsonb),
+    (13, 'deliver_webhook', '{"url":"https://hooks.acme-billing.com/v1/invoices","body":{"invoice_id":"inv_7788","amount_cents":4250}}'::jsonb),
+    (14, 'sleep',           '{"ms":800}'::jsonb)
   ) AS f(n, type, payload)
-  WHERE n = 1 + (i % 4)
+  WHERE n = 1 + (i % 14)
 `;
 
 async function main(): Promise<void> {
@@ -170,12 +201,21 @@ async function main(): Promise<void> {
   await db.query(
     `INSERT INTO jobs (id, type, payload, status, attempts, max_attempts,
                        last_error, created_at, started_at, completed_at)
-     SELECT gen_random_uuid(), 'deliver_webhook',
-            jsonb_build_object('url','http://127.0.0.1:4001/hook'),
-            'failed', 1, 5,
-            'http://127.0.0.1:4001/hook responded 400 after 6ms: {"error":"unknown event type"}',
+     SELECT gen_random_uuid(), 'deliver_webhook', p.payload, 'failed', 1, 5, p.last_error,
             c.at, c.at + make_interval(secs => 0.04), c.at + make_interval(secs => 0.1)
        FROM generate_series(1, $1) AS i
+       CROSS JOIN LATERAL (
+         SELECT payload, last_error FROM (VALUES
+           (1, '{"url":"https://hooks.acme-billing.com/v1/invoices","body":{"event":"invoice.void"}}'::jsonb,
+               'https://hooks.acme-billing.com/v1/invoices responded 400 after 34ms: {"error":"unknown event type: invoice.void"}'),
+           (2, '{"url":"https://api.shipping-partner.io/webhooks/dispatch","body":{"order_id":null}}'::jsonb,
+               'https://api.shipping-partner.io/webhooks/dispatch responded 400 after 19ms: {"error":"order_id must not be null"}'),
+           (3, '{"url":"https://notify.internal.acme.dev/events","body":{"event":"user.merged","user_id":"abc"}}'::jsonb,
+               'https://notify.internal.acme.dev/events responded 422 after 28ms: {"error":"user_id must be an integer"}'),
+           (4, '{"url":"https://hooks.acme-billing.com/v1/receipts","body":{"receipt_id":"rc_0"}}'::jsonb,
+               'https://hooks.acme-billing.com/v1/receipts responded 404 after 45ms: {"error":"no such receipt"}')
+         ) AS g(n, payload, last_error) WHERE n = 1 + (i % 4)
+       ) p
        CROSS JOIN LATERAL (
          SELECT now() - make_interval(secs => (i * 5000) + floor(random() * 400)::int) AS at
        ) c`,
@@ -187,17 +227,35 @@ async function main(): Promise<void> {
   // retrying — backing off, with the delayed-set entry that makes the backoff real.
   // Spread over the next few minutes so somebody watching sees them fire one by one
   // rather than all at once.
+  //
+  // ALWAYS_FAIL, NOT DELIVER_WEBHOOK, AND THE REASON IS NOT COSMETIC.
+  //
+  // Everything above this line is history: a succeeded or dead row is never executed
+  // again, so its url is text on a page and can name a realistic host. These rows are
+  // live — the scheduler promotes them and a worker really runs them — so whatever url
+  // they carry receives an actual HTTP request from a public deployment. Seeding a
+  // plausible-looking domain here would fire unsolicited POSTs at whoever owns it.
+  //
+  // always_fail needs no url, fails on its own terms, and still demonstrates the whole
+  // mechanism: backoff, attempts climbing, and the dead-letter queue at the end.
   const retrying = await db.query<{ id: string; next_run_at: Date }>(
     `INSERT INTO jobs (id, type, payload, status, attempts, max_attempts,
                        last_error, created_at, started_at, next_run_at)
-     SELECT gen_random_uuid(), 'deliver_webhook',
-            jsonb_build_object('url','http://127.0.0.1:4001/hook/flaky/3'),
+     SELECT gen_random_uuid(), 'always_fail',
+            jsonb_build_object('message', m.text),
             'retrying', 1 + (i % 4), 5,
-            'http://127.0.0.1:4001/hook/flaky/3 responded 503 after 8ms: {"error":"try again later"}',
+            'always_fail: ' || m.text,
             now() - make_interval(secs => 90 + i * 11),
             now() - make_interval(secs => 85 + i * 11),
             now() + make_interval(secs => 20 + i * 45)
        FROM generate_series(1, $1) AS i
+       CROSS JOIN LATERAL (
+         SELECT (ARRAY[
+           'downstream returned 503, backing off',
+           'receiver config is wrong',
+           'signing key rotated mid-flight'
+         ])[1 + (i % 3)] AS text
+       ) m
      RETURNING id, next_run_at`,
     [COUNTS.retrying],
   );
@@ -212,16 +270,26 @@ async function main(): Promise<void> {
   // queued — waiting for a worker, with the id actually in the queue. These are the
   // ones that make the demo move: a running worker drains them, so within seconds
   // 'running' appears on its own and the succeeded count starts climbing.
+  //
+  // No deliver_webhook here either, for the reason given above the retrying block: a
+  // queued job is one a worker is about to actually run, and a url in it becomes a real
+  // request to whoever owns that host. sleep and always_fail together still show both
+  // paths — jobs succeeding, and jobs backing off into the dead-letter queue.
+  //
+  // The previous version also handed always_fail a {"ms": N} payload, because the type
+  // and the payload were chosen by two different expressions. The handler destructures
+  // { message }, so it threw its fallback error instead of the seeded one — the same
+  // class of mismatch as the type/error bug, one level down.
   const queued = await db.query<{ id: string }>(
     `INSERT INTO jobs (id, type, payload, status, max_attempts, created_at)
      SELECT gen_random_uuid(), t.type, t.payload, 'queued', 5, now()
        FROM generate_series(1, $1) AS i
        CROSS JOIN LATERAL (
-         SELECT (ARRAY['sleep','deliver_webhook','sleep','always_fail'])[1 + (i % 4)] AS type,
-                CASE (i % 4)
-                  WHEN 1 THEN jsonb_build_object('url','http://127.0.0.1:4001/hook','timeoutMs',10000)
-                  ELSE jsonb_build_object('ms', 2000 + (i % 6) * 1500)
-                END AS payload
+         SELECT type, payload FROM (VALUES
+           (0, 'sleep',       jsonb_build_object('ms', 3000)),
+           (1, 'sleep',       jsonb_build_object('ms', 7000)),
+           (2, 'always_fail', jsonb_build_object('message','downstream returned 503, backing off'))
+         ) AS g(n, type, payload) WHERE n = i % 3
        ) t
      RETURNING id`,
     [COUNTS.queued],
