@@ -36,7 +36,14 @@ const KEY_DIGESTS = API_KEYS.map(sha256);
 // password already sitting inside DATABASE_URL — not a user record in a table. Hashing
 // protects a password against someone reading the database it lives in, and there is no
 // such database here: anyone who can read this value can read the whole .env anyway.
-const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD ?? "";
+//
+// TRIMMED, for the same reason API_KEYS is, and it was an oversight that it was not.
+// Every hosting dashboard takes secrets in a multi-line textarea — Render's is one —
+// and a value pasted into one carries a trailing newline often enough that the first
+// symptom is "wrong password" against a password that is visibly correct. There is no
+// legitimate secret with leading or trailing whitespace, so nothing is lost by removing
+// it and a whole class of unexplainable login failure goes with it.
+const ADMIN_PASSWORD = (process.env.ADMIN_PASSWORD ?? "").trim();
 
 /**
  * Signs the session cookie.
@@ -45,7 +52,11 @@ const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD ?? "";
  * every session — and with more than one API process, a cookie issued by one is rejected by
  * the others. The startup warning says so; set it in .env.
  */
-const SESSION_SECRET = process.env.SESSION_SECRET ?? randomBytes(32).toString("hex");
+// Trimmed too, and this one fails more quietly than the password does. A stray newline
+// here does not produce an error — it just makes a different signing key, so every
+// session issued before the whitespace appeared stops verifying, with nothing in the
+// logs to say why.
+const SESSION_SECRET = (process.env.SESSION_SECRET ?? randomBytes(32).toString("hex")).trim();
 
 const SESSION_COOKIE = "qf_session";
 const SESSION_TTL_MS = 12 * 60 * 60 * 1000;
