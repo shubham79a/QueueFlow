@@ -37,10 +37,17 @@ import {
 //
 // Defaults are chosen to work as-is. The webhook one points at the local test
 // receiver, which is what `npm run dev:receiver` starts.
+// The webhook url starts EMPTY rather than pointing at 127.0.0.1:4001.
+//
+// That default was the local test receiver, which is right on a laptop running
+// `npm run dev:receiver` and wrong everywhere else: on a deployed instance it is a
+// localhost address in front of anyone who opens the form, and pressing Create sends the
+// job on a five-attempt round trip to nothing. The server now also refuses private
+// targets outright, so the old default would have been rejected at the boundary anyway.
 const DEFAULTS: Record<JobType, Record<string, string>> = {
   sleep: { ms: '5000' },
   always_fail: { message: 'this job always fails' },
-  deliver_webhook: { url: 'http://127.0.0.1:4001/hook', timeoutMs: '10000' },
+  deliver_webhook: { url: '', timeoutMs: '10000' },
 }
 
 export default function NewJobForm({
@@ -223,6 +230,8 @@ function check(type: JobType, payload: Record<string, unknown>): string | null {
 
   if (type === 'deliver_webhook') {
     const url = payload.url as string
+    if (!url) return 'url is required'
+
     let parsed: URL
     try {
       parsed = new URL(url)
@@ -231,6 +240,25 @@ function check(type: JobType, payload: Record<string, unknown>): string | null {
     }
     if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
       return 'url must be http or https'
+    }
+
+    // Mirrors the server's SSRF check so the message arrives as you type rather than
+    // after a round trip. The SERVER is the one that decides — this copy is only about
+    // speed of feedback, and it deliberately does not try to reproduce the server's
+    // local-development escape hatch, because a browser cannot know whether the API it
+    // is talking to has that switched on.
+    const host = parsed.hostname.toLowerCase()
+    if (
+      host === 'localhost' ||
+      host.endsWith('.localhost') ||
+      host === '::1' ||
+      /^127\./.test(host) ||
+      /^10\./.test(host) ||
+      /^192\.168\./.test(host) ||
+      /^169\.254\./.test(host) ||
+      /^172\.(1[6-9]|2\d|3[01])\./.test(host)
+    ) {
+      return 'url must be a public address — private and loopback targets are refused'
     }
     const timeout = payload.timeoutMs as number
     if (!Number.isFinite(timeout) || timeout <= 0) return 'timeoutMs must be a positive number'

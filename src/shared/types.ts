@@ -97,6 +97,65 @@ export function isJobType(value: unknown): value is JobType {
   return typeof value === "string" && (JOB_TYPES as readonly string[]).includes(value);
 }
 
+/**
+ * Whether a webhook may target private and loopback addresses.
+ *
+ * OFF BY DEFAULT, because the safe default is the one that holds when somebody deploys
+ * this without reading anything. Local development needs it on — the test receiver runs
+ * on 127.0.0.1:4001 and the whole webhook demo depends on reaching it — so .env sets it
+ * and no deployment does.
+ */
+const ALLOW_PRIVATE_TARGETS = process.env.ALLOW_PRIVATE_WEBHOOK_TARGETS === "true";
+
+/**
+ * Server-side request forgery, and why a webhook sender is the natural place for it.
+ *
+ * deliver_webhook makes THE SERVER issue a request to a URL THE CALLER chose. Without a
+ * restriction that is a general-purpose proxy into wherever the server can reach, which
+ * on a hosted deployment includes things nothing outside should touch:
+ *
+ *   169.254.169.254   the cloud metadata endpoint — instance credentials on some hosts
+ *   127.0.0.1         the API's own port, from inside its own trust boundary
+ *   10.x / 172.16-31.x / 192.168.x   whatever else shares the private network
+ *
+ * Auth limits who can ask, and that is not the same as limiting what may be asked for.
+ *
+ * WHAT THIS DOES NOT STOP, stated plainly rather than implied: the check is on the
+ * hostname as written, so a public name that RESOLVES to a private address walks
+ * straight through it. Closing that means resolving the host here and re-checking the
+ * resolved address at connect time, because DNS can answer differently between the two.
+ * That is a real piece of work and it is written down as a gap rather than half-done —
+ * this blocks the literal cases, which is every accidental one and most deliberate ones.
+ */
+function blockedTarget(host: string): string | null {
+  if (ALLOW_PRIVATE_TARGETS) return null;
+
+  const h = host.toLowerCase().replace(/^\[|]$/g, "");
+
+  if (h === "localhost" || h.endsWith(".localhost") || h.endsWith(".local")) {
+    return "loopback";
+  }
+
+  // IPv6 loopback and link-local.
+  if (h === "::1" || h === "::" || h.startsWith("fe80:") || h.startsWith("fc") || h.startsWith("fd")) {
+    return "private IPv6";
+  }
+
+  const v4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(h);
+  if (!v4) return null;
+
+  const [a, b] = [Number(v4[1]), Number(v4[2])];
+
+  if (a === 127 || a === 0) return "loopback";
+  if (a === 10) return "private network";
+  if (a === 192 && b === 168) return "private network";
+  if (a === 172 && b >= 16 && b <= 31) return "private network";
+  // The one that matters most on a cloud host: instance metadata.
+  if (a === 169 && b === 254) return "link-local / cloud metadata";
+
+  return null;
+}
+
 // Validates a payload at the API boundary, where it arrives from outside.
 export function validatePayload(type: JobType, payload: unknown): string | null {
   if (typeof payload !== "object" || payload === null) return "payload must be an object";
@@ -124,6 +183,11 @@ export function validatePayload(type: JobType, payload: unknown): string | null 
     }
     if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
       return "deliver_webhook payload.url must be http or https";
+    }
+
+    const blocked = blockedTarget(parsed.hostname);
+    if (blocked) {
+      return `deliver_webhook payload.url points at a ${blocked} address, which this server will not call`;
     }
 
     if (p.timeoutMs !== undefined && (typeof p.timeoutMs !== "number" || p.timeoutMs <= 0)) {
