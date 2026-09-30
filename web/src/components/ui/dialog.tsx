@@ -63,6 +63,18 @@ function DialogContent({
           // than the page cutting to it.
           "data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95 data-[state=open]:slide-in-from-bottom-2",
           "fixed top-[50%] left-[50%] z-50 grid w-full max-w-[calc(100%-2rem)] translate-x-[-50%] translate-y-[-50%] gap-5 rounded-xl border p-6 shadow-2xl duration-200 sm:max-w-lg",
+          // WITHOUT THIS A TALL DIALOG IS UNREACHABLE, not merely ugly.
+          //
+          // The box is centred by translate-y-[-50%], so content taller than the
+          // viewport spills off BOTH ends — and being `fixed` with no overflow, nothing
+          // scrolls to reach it. The New job form with deliver_webhook selected is
+          // already tall enough to lose its title and its Cancel button on a landscape
+          // phone or a zoomed-in browser.
+          //
+          // dvh rather than vh because mobile browser chrome hides and reappears on
+          // scroll; vh measures the taller state, so the bottom stays cut off exactly
+          // when the toolbar is showing.
+          "max-h-[calc(100dvh-2rem)] overflow-y-auto",
           className
         )}
         {...props}
