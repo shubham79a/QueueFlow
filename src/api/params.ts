@@ -2,20 +2,16 @@ import { JOB_STATUSES, type JobStatus } from "../shared/types.js";
 
 // Query parameters arrive as strings from strangers. Everything here turns one into
 // a value the rest of the code can trust, or refuses it.
-//
 // The refusal matters as much as the parsing. Before this existed, `?limit=abc`
 // reached Postgres as NaN and came back as a 500 with a stack trace in it — the
 // caller's mistake reported as the server's fault.
 
 /** Thrown for anything the caller got wrong. The error handler turns it into a 400. */
-export class BadRequest extends Error {}
+export class BadRequest extends Error { }
 
-/**
- * How many rows to return.
- *
- * Clamped at BOTH ends. The previous version used Math.min alone, which caps the top
- * and lets a negative straight through to `LIMIT -5`.
- */
+// How many rows to return.
+// Clamped at BOTH ends. The previous version used Math.min alone, which caps the top
+// and lets a negative straight through to `LIMIT -5`.
 export function parseLimit(raw: unknown, fallback = 20, max = 100): number {
   if (raw === undefined) return fallback;
   if (typeof raw !== "string") throw new BadRequest("limit must be a single value");
@@ -29,12 +25,9 @@ export function parseLimit(raw: unknown, fallback = 20, max = 100): number {
   return Math.min(n, max);
 }
 
-/**
- * A status filter, if there is one.
- *
- * An unknown status is a 400 rather than an empty list. `?status=died` returning
- * "no jobs" looks like an answer; it is a typo.
- */
+// A status filter, if there is one.
+// An unknown status is a 400 rather than an empty list. `?status=died` returning
+// "no jobs" looks like an answer; it is a typo.
 export function parseStatus(raw: unknown): JobStatus | undefined {
   if (raw === undefined) return undefined;
   if (typeof raw !== "string") throw new BadRequest("status must be a single value");
@@ -45,21 +38,17 @@ export function parseStatus(raw: unknown): JobStatus | undefined {
   return raw as JobStatus;
 }
 
-/**
- * Where the next page starts: a timestamp and the id that breaks ties on it.
- */
+// Where the next page starts: a timestamp and the id that breaks ties on it.
 export interface Cursor {
   t: string;
   id: string;
 }
 
-/**
- * Cursors go out base64-encoded, and that is deliberate rather than decorative.
- *
- * The client cannot build one, so it cannot come to depend on the shape, which
- * leaves us free to page on something else later without breaking every caller. It
- * also stops anyone treating it as a filter — a cursor is a bookmark, not a query.
- */
+// Cursors go out base64-encoded, and that is deliberate rather than decorative.
+
+// The client cannot build one, so it cannot come to depend on the shape, which
+// leaves us free to page on something else later without breaking every caller. It
+// also stops anyone treating it as a filter — a cursor is a bookmark, not a query.
 export function encodeCursor(c: Cursor): string {
   return Buffer.from(JSON.stringify(c), "utf8").toString("base64url");
 }

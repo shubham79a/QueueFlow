@@ -5,13 +5,13 @@ export type JobType = (typeof JOB_TYPES)[number];
 // Maps each job type to the payload it expects.
 export interface JobPayloads {
   sleep: { ms: number };
-  /** A test fixture: throws so the failed path and last_error are reachable. */
+  // A test fixture: throws so the failed path and last_error are reachable.
   always_fail: { message?: string };
-  /** POST `body` as JSON to `url`. Fails on timeout, refusal, or any non-2xx. */
+  // POST `body` as JSON to `url`. Fails on timeout, refusal, or any non-2xx.
   deliver_webhook: { url: string; body?: unknown; timeoutMs?: number };
 }
 
-/** The lifecycle. Mirrors the CHECK constraint in db/schema.sql — keep them in step. */
+// The lifecycle. Mirrors the CHECK constraint in db/schema.sql — keep them in step.
 export const JOB_STATUSES = [
   "queued",
   "running",
@@ -97,36 +97,27 @@ export function isJobType(value: unknown): value is JobType {
   return typeof value === "string" && (JOB_TYPES as readonly string[]).includes(value);
 }
 
-/**
- * Whether a webhook may target private and loopback addresses.
- *
- * OFF BY DEFAULT, because the safe default is the one that holds when somebody deploys
- * this without reading anything. Local development needs it on — the test receiver runs
- * on 127.0.0.1:4001 and the whole webhook demo depends on reaching it — so .env sets it
- * and no deployment does.
- */
+// Whether a webhook may target private and loopback addresses.
+// OFF BY DEFAULT, because the safe default is the one that holds when somebody deploys
+// this without reading anything. Local development needs it on — the test receiver runs
+// on 127.0.0.1:4001 and the whole webhook demo depends on reaching it — so .env sets it
+// and no deployment does.
 const ALLOW_PRIVATE_TARGETS = process.env.ALLOW_PRIVATE_WEBHOOK_TARGETS === "true";
 
-/**
- * Server-side request forgery, and why a webhook sender is the natural place for it.
- *
- * deliver_webhook makes THE SERVER issue a request to a URL THE CALLER chose. Without a
- * restriction that is a general-purpose proxy into wherever the server can reach, which
- * on a hosted deployment includes things nothing outside should touch:
- *
- *   169.254.169.254   the cloud metadata endpoint — instance credentials on some hosts
- *   127.0.0.1         the API's own port, from inside its own trust boundary
- *   10.x / 172.16-31.x / 192.168.x   whatever else shares the private network
- *
- * Auth limits who can ask, and that is not the same as limiting what may be asked for.
- *
- * WHAT THIS DOES NOT STOP, stated plainly rather than implied: the check is on the
- * hostname as written, so a public name that RESOLVES to a private address walks
- * straight through it. Closing that means resolving the host here and re-checking the
- * resolved address at connect time, because DNS can answer differently between the two.
- * That is a real piece of work and it is written down as a gap rather than half-done —
- * this blocks the literal cases, which is every accidental one and most deliberate ones.
- */
+// Server-side request forgery, and why a webhook sender is the natural place for it.
+// deliver_webhook makes THE SERVER issue a request to a URL THE CALLER chose. Without a
+// restriction that is a general-purpose proxy into wherever the server can reach, which
+// on a hosted deployment includes things nothing outside should touch:
+//   169.254.169.254   the cloud metadata endpoint — instance credentials on some hosts
+//   127.0.0.1         the API's own port, from inside its own trust boundary
+//   10.x / 172.16-31.x / 192.168.x   whatever else shares the private network
+// Auth limits who can ask, and that is not the same as limiting what may be asked for.
+// WHAT THIS DOES NOT STOP, stated plainly rather than implied: the check is on the
+// hostname as written, so a public name that RESOLVES to a private address walks
+// straight through it. Closing that means resolving the host here and re-checking the
+// resolved address at connect time, because DNS can answer differently between the two.
+// That is a real piece of work and it is written down as a gap rather than half-done —
+// this blocks the literal cases, which is every accidental one and most deliberate ones.
 function blockedTarget(host: string): string | null {
   if (ALLOW_PRIVATE_TARGETS) return null;
 

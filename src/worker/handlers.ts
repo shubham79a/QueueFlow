@@ -38,13 +38,11 @@ const deliverWebhook: Handler = async (job, log) => {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        /**
-         * Identifies the delivery, the way GitHub sends X-GitHub-Delivery and
-         * Stripe sends an idempotency key. It lets the receiver recognise a
-         * repeat of something it has already handled — which is the receiver's
-         * half of the idempotency problem, and the reason this header exists
-         * before we need it.
-         */
+        // Identifies the delivery, the way GitHub sends X-GitHub-Delivery and
+        // Stripe sends an idempotency key. It lets the receiver recognise a
+        // repeat of something it has already handled — which is the receiver's
+        // half of the idempotency problem, and the reason this header exists
+        // before we need it.
         "X-QueueFlow-Job-Id": job.id,
         "X-QueueFlow-Attempt": String(job.attempts),
       },

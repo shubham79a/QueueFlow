@@ -5,18 +5,12 @@ import { createDb, query } from "../shared/db.js";
 import { onShutdown } from "../shared/shutdown.js";
 import { reapDead, sweepOrphans } from "./reaper.js";
 
-// The scheduler.
-// One job, stated once: PUT JOBS BACK ON THE PENDING LIST. There are three reasons a job needs putting back,
-// and this process is the only thing that knows about any of them:
+// The scheduler. Every 1 sec, reaper case - every 5 sec (costly)
+// One job, stated once: PUT JOBS BACK ON THE PENDING LIST. There are three reasons a job needs putting back:
 // 1.  its backoff elapsed        promoteDue()   — a failed job whose retry is due
 // 2.  its worker stopped talking reapDead()     — a crash, and the job was rescued
 // 3.  it was never queued at all sweepOrphans() — the API died mid-enqueue
-// - All three are the same sentence with a different cause, which is why they belong
-// in one process rather than three. A worker's job description stays "run the next
-// job"; everything about work that is not currently moving lives here.
-// - A separate process rather than a loop inside each worker, because it is visible:
-// you can watch it, and you can kill it and see retries stop and crashed jobs stay
-// stuck — the honest way to learn that it is a single point of failure. Running two is safe.
+// All three are the same sentence with a different cause, which is why they belong in one process rather than three.
 
 const SCHEDULER_ID = process.env.SCHEDULER_ID ?? "s1";
 
@@ -51,19 +45,13 @@ async function promoteDue(): Promise<number> {
   for (const jobId of due) {
 
     // ZREM IS THE CLAIM, and it is why several schedulers can run safely.
-    // -- Redis executes commands one at a time, so if two schedulers both see this
-    // job as due, exactly one of their ZREMs removes it and returns 1; the other
-    // returns 0 and skips. No lock, no leader election — the same atomicity that
-    // stops two workers taking the same job from the pending list.
-    // -- Doing this the obvious way instead — read, then push, then remove — would
+    // -- Redis executes commands one at a time, so if two schedulers both see this job as due >> only one can get the job
+    // due to atomicity. No lock, no leader election — the same atomicity that stops two workers taking the same job 
+    // from the pending list. Doing this the obvious way instead — read, then push, then remove — would
     // let both schedulers push the id, and the job would run twice.
 
     const claimed = await redis.zrem(KEYS.delayed, jobId);
     if (claimed !== 1) continue;
-    // Row first, then the push — the same ordering as everywhere else. A crash
-    // between them leaves a row saying 'queued' with an id that is in neither
-    // Redis structure: an orphan the sweep will find and re-push, rather than a worker
-    // receiving an id whose row still claims to be waiting for a retry.
 
     await query(
       db,
@@ -80,18 +68,13 @@ async function promoteDue(): Promise<number> {
   return promoted;
 }
 
-/**
- * How long to wait before looking again.
- *
- * THIS IS THE ONE PLACE IN THE PROJECT WHERE POLLING IS UNAVOIDABLE, and the
- * contrast with the worker is deliberate. BLMOVE exists because Redis can tell you
- * the instant a list gains an element. There is no equivalent for "wake me when
- * this score becomes reachable" — time passing is not an event Redis can notify on.
- *
- * So instead of polling blindly at a fixed interval, ask the sorted set when its
- * earliest job is due and sleep until then, capped at MAX_SLEEP_MS so a newly
- * scheduled job is not missed. An empty delayed set costs one ZRANGE per second.
- */
+// How long to wait before looking again.
+// THIS IS THE ONE PLACE IN THE PROJECT WHERE POLLING IS UNAVOIDABLE, and the contrast with the worker is deliberate.
+// BLMOVE exists because Redis can tell you the instant a list gains an element. There is no equivalent for 
+// "wake me when this score becomes reachable" — time passing is not an event Redis can notify on.
+// So instead of polling blindly at a fixed interval, ask the sorted set when its earliest job is due and 
+// sleep until then, capped at MAX_SLEEP_MS so a newly scheduled job is not missed. An empty delayed set costs one ZRANGE per second.
+
 async function sleepUntilNextDue(): Promise<void> {
   const [, score] = await redis.zrange(KEYS.delayed, 0, 0, "WITHSCORES");
   if (score === undefined) return sleep(MAX_SLEEP_MS);
@@ -100,19 +83,10 @@ async function sleepUntilNextDue(): Promise<void> {
   await sleep(Math.max(0, Math.min(waitMs, MAX_SLEEP_MS)));
 }
 
-/**
- * The recovery pass — dead workers, then orphans, in that order.
- *
- * The order is not arbitrary. Reaping moves ids out of a dead worker's processing
- * list and back into pending; sweeping asks "which 'queued' rows are in no Redis
- * structure at all?". Sweeping first would see rows the reaper is about to fix and
- * push their ids a second time.
- *
- * Errors are caught rather than allowed to escape. A failure here — Postgres
- * blinking, a connection reset mid-SCAN — must not take down the process that
- * every retry in the system depends on. The next pass tries again in a few
- * seconds, and the jobs are still sitting safely in Redis in the meantime.
- */
+// The recovery pass — dead workers, then orphans, in that order.
+// The order is not arbitrary. Reaping moves ids out of a dead worker's processing list and back into pending; 
+// sweeping asks "which 'queued' rows are in no Redis structure at all?". Sweeping first would see rows the reaper 
+// is about to fix and push their ids a second time.
 async function recoverLostWork(): Promise<void> {
   try {
     const reaped = await reapDead(redis, db, log);
@@ -134,34 +108,13 @@ let stopping = false;
 let loopHasExited!: () => void;
 const loopExit = new Promise<void>((resolve) => { loopHasExited = resolve; });
 
-/**
- * Stop at a pass boundary rather than wherever the signal happened to land.
- *
- * Nothing here is long-running — a pass is one bounded batch — so there is no draining to
- * do, only a place to stop cleanly. What this avoids is dying PART WAY through a promote:
- * `promoteDue` does ZREM, then UPDATE, then LPUSH, and a process killed between the second
- * and third leaves a 'queued' row whose id is in no Redis structure at all. Nothing breaks
- * — sweepOrphans is built for exactly that shape — but the retry fires a minute late for
- * no reason.
- *
- * Worst case this waits out `sleepUntilNextDue`, capped at MAX_SLEEP_MS, so about a
- * second. Interrupting that sleep would cost more complexity than the second is worth.
- */
+// Stop after the current pass finishes so we don't leave a
+// partially completed promote/recovery operation.
 async function drain(): Promise<void> {
   stopping = true;
 
-  // WAIT FOR THE PASS TO FINISH BEFORE CLOSING ANYTHING.
-  //
-  // Setting the flag only asks the loop to stop at the top of its next iteration; it does
-  // nothing about the one already running. Closing Redis here instead of waiting would
-  // make whatever command that pass tries next fail — and if it were mid-promote, between
-  // the UPDATE and the LPUSH, that is precisely the half-finished promote described above.
-  // The shutdown would cause the exact problem it exists to avoid.
-  //
-  // Capped, because a drain must never hang on its own bookkeeping. The longest a pass can
-  // take is a reap (a SCAN over the processing lists) or a sleepUntilNextDue, so five
-  // seconds is generous; past that, closing underneath it is no worse than the SIGKILL
-  // that would otherwise be coming.
+  // Wait for the loop to exit (main() function loop which handles all reschedule functions), but don't hang shutdown forever.
+  // so 5 seconds is max time we will wait later quit both db and redis connections
   const finished = await Promise.race([
     loopExit.then(() => true),
     new Promise<boolean>((r) => setTimeout(() => r(false), 5_000)),

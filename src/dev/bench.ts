@@ -113,11 +113,9 @@ async function run(workers: number, concurrency: number) {
     await sleep(50);
   }
 
-  /**
-   * Elapsed comes from the database, not from a stopwatch in this process:
-   * first job started -> last job completed. That excludes both the enqueue loop
-   * and worker boot time, neither of which is throughput.
-   */
+  // Elapsed comes from the database, not from a stopwatch in this process:
+  // first job started -> last job completed. That excludes both the enqueue loop
+  // and worker boot time, neither of which is throughput.
   const { rows } = await db.query<Record<string, string>>(`
     SELECT
       COUNT(*)::text AS done,
@@ -161,14 +159,14 @@ for (const [workers, concurrency] of MATRIX) {
   const m = await run(workers, concurrency);
   console.log(
     `${pad(m.workers, 7)}  ${pad(m.concurrency, 4)}   ${pad(m.jobsPerSec.toFixed(1), 6)}` +
-      `   ${pad(m.p50Wait.toFixed(2) + "s", 8)}   ${pad(m.p99Wait.toFixed(2) + "s", 8)}` +
-      `   ${pad(m.p99Exec.toFixed(2) + "s", 8)}   ${pad(m.duplicates, 5)}`,
+    `   ${pad(m.p50Wait.toFixed(2) + "s", 8)}   ${pad(m.p99Wait.toFixed(2) + "s", 8)}` +
+    `   ${pad(m.p99Exec.toFixed(2) + "s", 8)}   ${pad(m.duplicates, 5)}`,
   );
 }
 
 console.log(
   "\nRead the table for where jobs/s flattens while p99 wait keeps rising —\n" +
-    "that is the bottleneck leaving this system. dupes must be 0 in every row.\n",
+  "that is the bottleneck leaving this system. dupes must be 0 in every row.\n",
 );
 
 await db.end();

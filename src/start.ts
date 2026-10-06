@@ -1,27 +1,23 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { resolve } from "node:path";
 
-/**
- * Every role in one process tree.
- *
- * THIS EXISTS FOR PLATFORMS THAT ONLY SELL WEB SERVICES. The design is three separate
- * deployables — docker-compose.prod.yml runs them as three services, and that is the
- * arrangement the project is actually about, because a worker pool you can scale
- * independently of the API is the point of having a queue at all. Render's free tier
- * has no background workers, so on that plan the choice is one container running
- * everything or nothing running at all.
- *
- * What is lost, said plainly rather than buried:
- *   - The API and the workers now share a CPU and an event loop's worth of scheduling.
- *     A busy worker makes the dashboard slower, which on separate services it does not.
- *   - `--scale worker=3` is gone. Concurrency inside the one process is the only dial.
- *   - One crash takes all three down, which is why this exits on any child exiting
- *     rather than limping on.
- *
- * What survives: the processes are still separate OS processes with separate Redis
- * connections, so the handoff, the heartbeat and the reaper all behave exactly as they
- * do in production. This is a packaging compromise, not an architectural one.
- */
+// Every role in one process tree.
+// THIS EXISTS FOR PLATFORMS THAT ONLY SELL WEB SERVICES. The design is three separate
+// deployables — docker-compose.prod.yml runs them as three services, and that is the
+// arrangement the project is actually about, because a worker pool you can scale
+// independently of the API is the point of having a queue at all. Render's free tier
+// has no background workers, so on that plan the choice is one container running
+// everything or nothing running at all.
+
+// What is lost, said plainly rather than buried:
+//   - The API and the workers now share a CPU and an event loop's worth of scheduling.
+//     A busy worker makes the dashboard slower, which on separate services it does not.
+//   - `--scale worker=3` is gone. Concurrency inside the one process is the only dial.
+//   - One crash takes all three down, which is why this exits on any child exiting
+//     rather than limping on.
+// What survives: the processes are still separate OS processes with separate Redis
+// connections, so the handoff, the heartbeat and the reaper all behave exactly as they
+// do in production. This is a packaging compromise, not an architectural one.
 
 const DIST = resolve(import.meta.dirname);
 
@@ -40,14 +36,11 @@ function log(message: string): void {
   process.stdout.write(`[start] ${message}\n`);
 }
 
-/**
- * Run the migration and wait for it.
- *
- * There is no pre-deploy hook on a free plan, so this is the only place it can happen.
- * Everything in schema.sql is IF NOT EXISTS, so running it on every boot is a no-op
- * after the first — which is what makes it safe to put in the startup path rather than
- * in a deploy step somebody has to remember.
- */
+// Run the migration and wait for it.
+// There is no pre-deploy hook on a free plan, so this is the only place it can happen.
+// Everything in schema.sql is IF NOT EXISTS, so running it on every boot is a no-op
+// after the first — which is what makes it safe to put in the startup path rather than
+// in a deploy step somebody has to remember.
 function migrate(): Promise<void> {
   return new Promise((ok, fail) => {
     log("running migrations");
@@ -65,21 +58,17 @@ function migrate(): Promise<void> {
   });
 }
 
-/**
- * Was this exit somebody asking the process to stop, rather than it falling over?
- *
- * FOUND BY RUNNING IT. A SIGTERM to the process GROUP — which is what a shell sends,
- * and what some supervisors send — reaches the children directly, at the same moment
- * it reaches this process. The child's exit event can then fire before this process's
- * own signal handler has run, so `shuttingDown` is still false and a perfectly normal
- * stop gets reported as a crash and exits 1. On Render that would make every routine
- * sleep look like a failed deploy.
- *
- * Node reports it two ways depending on how the signal arrived: `signal` is set when
- * it killed the child directly, and `code` is 128 + the signal number when the child
- * handled it and exited itself — 143 for SIGTERM, 130 for SIGINT. Both mean the same
- * thing here.
- */
+// Was this exit somebody asking the process to stop, rather than it falling over?
+// FOUND BY RUNNING IT. A SIGTERM to the process GROUP — which is what a shell sends,
+// and what some supervisors send — reaches the children directly, at the same moment
+// it reaches this process. The child's exit event can then fire before this process's
+// own signal handler has run, so `shuttingDown` is still false and a perfectly normal
+// stop gets reported as a crash and exits 1. On Render that would make every routine
+// sleep look like a failed deploy.
+// Node reports it two ways depending on how the signal arrived: `signal` is set when
+// it killed the child directly, and `code` is 128 + the signal number when the child
+// handled it and exited itself — 143 for SIGTERM, 130 for SIGINT. Both mean the same
+// thing here.
 function wasSignalled(code: number | null, signal: NodeJS.Signals | null): boolean {
   if (signal === "SIGTERM" || signal === "SIGINT") return true;
   return code === 143 || code === 130;
@@ -111,13 +100,10 @@ function startRoles(): void {
   }
 }
 
-/**
- * Pass the signal down and wait.
- *
- * Forwarding rather than exiting is what makes the graceful shutdown work apply here:
- * each child stops taking new work, finishes what it holds, and removes its own
- * heartbeat. Killing this process alone would orphan them mid-job.
- */
+// Pass the signal down and wait.
+// Forwarding rather than exiting is what makes the graceful shutdown work apply here:
+// each child stops taking new work, finishes what it holds, and removes its own
+// heartbeat. Killing this process alone would orphan them mid-job.
 async function stop(signal: NodeJS.Signals): Promise<void> {
   if (shuttingDown) return;
   shuttingDown = true;

@@ -3,35 +3,18 @@ import { existsSync } from "node:fs";
 import { join, resolve } from "node:path";
 import express, { type NextFunction, type Request, type Response } from "express";
 import {
-  BadRequest,
-  decodeCursor,
-  encodeCursor,
-  parseLimit,
-  parseStatus,
+  BadRequest, decodeCursor, encodeCursor, parseLimit, parseStatus,
 } from "./params.js";
 import {
-  KEYS,
-  scanKeys,
-  workerIdFromAliveKey,
-  workerIdFromProcessingKey,
+  KEYS, scanKeys, workerIdFromAliveKey, workerIdFromProcessingKey,
 } from "../shared/keys.js";
 import { createLogger } from "../shared/log.js";
 import { createRedis } from "../shared/redis.js";
 import { createDb, query } from "../shared/db.js";
 import { onShutdown } from "../shared/shutdown.js";
 import {
-  AUTH_DISABLED,
-  KEYS_CONFIGURED,
-  LOGIN_ENABLED,
-  SESSION_SECRET_SET,
-  clearFailures,
-  clearSessionCookie,
-  hasSession,
-  isCorrectPassword,
-  isThrottled,
-  recordFailure,
-  requireWrite,
-  setSessionCookie,
+  AUTH_DISABLED, KEYS_CONFIGURED, LOGIN_ENABLED, SESSION_SECRET_SET, clearFailures, clearSessionCookie,
+  hasSession, isCorrectPassword, isThrottled, recordFailure, requireWrite, setSessionCookie,
 } from "./auth.js";
 import { isJobType, rowToJob, validatePayload, type JobRow } from "../shared/types.js";
 
@@ -43,11 +26,9 @@ const db = createDb("api", log);
 
 const app = express();
 
-// Behind a reverse proxy — which is every deployment — the connection Express sees is
-// plain HTTP from the proxy, even when the browser used HTTPS. So `req.secure` is false
-// and the session cookie never gets its Secure flag, meaning it would happily be sent
-// over an unencrypted connection. Trusting the proxy's X-Forwarded-Proto fixes that.
-//
+// Behind a reverse proxy — which is every deployment — the connection Express sees is plain HTTP from the proxy, 
+// even when the browser used HTTPS. So `req.secure` is false and the session cookie never gets its Secure flag, 
+// meaning it would happily be sent over an unencrypted connection. Trusting the proxy's X-Forwarded-Proto fixes that.
 // Off by default, because trusting that header when there is NO proxy in front lets any
 // client claim its own connection is secure just by sending it.
 if (process.env.TRUST_PROXY) {
@@ -56,9 +37,8 @@ if (process.env.TRUST_PROXY) {
 
 app.use(express.json());
 
-// Every JSON route lives on this router, mounted at /api. The prefix exists because the
-// dashboard is served from the same process at `/` — without it, GET /jobs would have to
-// be both the JSON list and the page that shows it.
+// Every JSON route lives on this router, mounted at /api. The prefix exists because the dashboard is served from the same
+// process at `/` — without it, GET /jobs would have to be both the JSON list and the page that shows it.
 const api = express.Router();
 
 const JOB_COLUMNS = `id, type, payload, status, attempts, max_attempts,
@@ -77,17 +57,14 @@ api.post("/jobs", requireWrite, async (req, res) => {
   const invalid = validatePayload(type, payload);
   if (invalid) return res.status(400).json({ error: invalid });
 
-  // Optional, and supplied by the CALLER — which is the only place it can come
-  // from. The caller is the only party that knows two of its requests mean the
-  // same thing; nothing observable about the second request distinguishes it from
+  // Optional, and supplied by the CALLER — which is the only place it can come from. The caller is the only party that knows 
+  // two of its requests mean the same thing; nothing observable about the second request distinguishes it from
   // a legitimate second order for the same amount to the same address.
 
-  // The header spelling is the one Stripe popularised and most APIs now copy.
-  // NULL when absent, and NULLs do not collide in a UNIQUE index, so callers that
-  // do not send one keep the old behaviour exactly: every POST is a new job.
+  // The header spelling is the one Stripe popularised and most APIs now copy. NULL when absent, and NULLs do not collide 
+  // in a UNIQUE index, so callers that do not send one keep the old behaviour exactly: every POST is a new job.
 
   const idempotencyKey = req.get("Idempotency-Key") ?? null;
-
   const id = randomUUID();
 
   // TWO WRITES, TWO STORES, AND NO WAY TO MAKE THEM ATOMIC. Redis and Postgress
@@ -106,7 +83,6 @@ api.post("/jobs", requireWrite, async (req, res) => {
        RETURNING ${JOB_COLUMNS}`,
     [id, type, JSON.stringify(payload), idempotencyKey],
   );
-
 
   // Idempotency check — NOTHING INSERTED means the key has been used before — this is a repeat of a request that
   // already succeeded, and the honest answer is the job that request created, not a second job doing the same work.
@@ -151,7 +127,6 @@ api.post("/jobs", requireWrite, async (req, res) => {
 });
 
 // GET /jobs/:id — the consumer, or anyone else who wants to know what happened to a job.
-
 api.get("/jobs/:id", async (req, res) => {
   const rows = await query<JobRow>(
     db,
@@ -166,17 +141,14 @@ api.get("/jobs/:id", async (req, res) => {
 });
 
 // POST /jobs/:id/replay — the dead-letter queue's exit door.
-
 // DLQ = Dead Letter Queue. Dead jobs who exhausted their attempts need human intervention to fix the cause of failure.
 // Attempt counter resets with new conditions, because the retries that were exhausted were spent against the old, broken conditions.
-
 // The <{ id: string }> is not decoration: with a middleware in the chain, Express's
 // overloads stop inferring the route's params and `id` widens to string | string[].
 api.post<{ id: string }>("/jobs/:id/replay", requireWrite, async (req, res) => {
   const { id } = req.params;
   // update is atomic, so no need to check if the job is dead first. If it is not, the update will return 0 rows and we can handle that case.
   // seprate? why not?
-
   // Two admins clicking replay at the same moment would both pass a prior SELECT, and both would push the id — the job would run twice.
   // Making the condition part of the write means the second UPDATE matches zero rows, and Postgres's row locking settles it.
 
@@ -217,23 +189,21 @@ api.get("/jobs", async (req, res) => {
   const limit = parseLimit(req.query.limit);
   const cursor = decodeCursor(req.query.cursor);
 
-  /**
-   * KEYSET, NOT OFFSET.
-   *
-   * OFFSET counts positions, and this list gains rows at the top every second or so.
-   * Between fetching page 1 and page 2, four new jobs shift everything down four
-   * places — so `OFFSET 20` now lands where `OFFSET 16` used to, and page 2 repeats
-   * four rows the caller has already seen. Deletions cause the mirror image: rows
-   * skipped entirely, silently.
-   *
-   * A cursor names a VALUE instead of a position. `(created_at, id) < (t, id)` means
-   * the same set of rows no matter what arrives above it.
-   *
-   * Comparing the pair rather than created_at alone is the tie-breaker: two rows can
-   * share a timestamp, and then `<` drops one and `<=` repeats one. Postgres compares
-   * tuples left to right, so this reads as "older, or the same instant with a smaller
-   * id" — which gives every row exactly one position.
-   */
+  // KEYSET, NOT OFFSET.
+  // OFFSET counts positions, and this list gains rows at the top every second or so.
+  // Between fetching page 1 and page 2, four new jobs shift everything down four
+  // places — so `OFFSET 20` now lands where `OFFSET 16` used to, and page 2 repeats
+  // four rows the caller has already seen. Deletions cause the mirror image: rows
+  // skipped entirely, silently.
+
+  // A cursor names a VALUE instead of a position. `(created_at, id) < (t, id)` means
+  // the same set of rows no matter what arrives above it.
+
+  // Comparing the pair rather than created_at alone is the tie-breaker: two rows can
+  // share a timestamp, and then `<` drops one and `<=` repeats one. Postgres compares
+  // tuples left to right, so this reads as "older, or the same instant with a smaller
+  // id" — which gives every row exactly one position.
+
   const where: string[] = [];
   const params: unknown[] = [];
 
@@ -246,13 +216,10 @@ api.get("/jobs", async (req, res) => {
     where.push(`(created_at, id) < ($${params.length - 1}, $${params.length})`);
   }
 
-  /**
-   * Fetch one more row than asked for.
-   *
-   * If it comes back, there is another page. That is the whole of `hasMore`, and it
-   * avoids a COUNT(*) — which in Postgres scans, and would run on every poll of every
-   * open tab. The extra row is dropped before responding.
-   */
+  // Fetch one more row than asked for.
+  // If it comes back, there is another page. That is the whole of `hasMore`, and it
+  // avoids a COUNT(*) — which in Postgres scans, and would run on every poll of every
+  // open tab. The extra row is dropped before responding.
   params.push(limit + 1);
 
   const rows = await query<JobRow>(
@@ -275,22 +242,20 @@ api.get("/jobs", async (req, res) => {
   });
 });
 
-/**
- * GET /workers — who is out there, and what is each of them holding.
- *
- * Assembled entirely from Redis, never from anything this process knows locally.
- * That is deliberate: the API has no connection to any worker and no idea how many
- * exist, so a worker on another machine shows up here exactly like one running in
- * the next terminal. The heartbeat key and the processing list ARE the worker's
- * public presence; there is nothing else to ask.
- *
- * THE INTERESTING ROW IS `alive: false` WITH `holding` ABOVE ZERO. That is a
- * worker that stopped talking while holding work — a crash, caught in the window
- * between its heartbeat expiring and the reaper's next pass. Kill a worker mid-job
- * and refresh this endpoint to watch it: first the TTL counts down, then `alive`
- * flips to false while the jobs are still listed against it, then the jobs move
- * back to pending and the row disappears.
- */
+// GET /workers — who is out there, and what is each of them holding.
+// Assembled entirely from Redis, never from anything this process knows locally.
+// That is deliberate: the API has no connection to any worker and no idea how many
+// exist, so a worker on another machine shows up here exactly like one running in
+// the next terminal. The heartbeat key and the processing list ARE the worker's
+// public presence; there is nothing else to ask.
+
+// THE INTERESTING ROW IS `alive: false` WITH `holding` ABOVE ZERO. That is a
+// worker that stopped talking while holding work — a crash, caught in the window
+// between its heartbeat expiring and the reaper's next pass. Kill a worker mid-job
+// and refresh this endpoint to watch it: first the TTL counts down, then `alive`
+// flips to false while the jobs are still listed against it, then the jobs move
+// back to pending and the row disappears.
+
 api.get("/workers", async (_req, res) => {
   const ids = new Set<string>();
 
@@ -330,10 +295,8 @@ api.get("/workers", async (_req, res) => {
 // Health of the dependencies, not of this process. Both are reported separately because they fail differently and mean
 // different things: without Redis nothing can be dispatched, and without Postgres nothing can be recorded — and
 // this API refuses to accept work it cannot record.
-
 api.get("/health", async (_req, res) => {
   const health: Record<string, unknown> = { status: "ok" };
-
   try {
     health.redis = await redis.ping();
     health.pending = await redis.llen(KEYS.pending);
@@ -362,7 +325,6 @@ api.get("/health", async (_req, res) => {
 
 // --------------------------------------------------------------------------
 // Operator login.
-//
 // The dashboard stays fully readable signed out; this only unlocks the actions that
 // write. A password rather than a key because a key pasted into a browser ends up
 // readable by anyone with devtools — see src/api/auth.ts.
@@ -398,7 +360,6 @@ api.post("/auth/logout", (_req, res) => {
 
 // How the dashboard decides what to render: whether to offer Sign in at all, and
 // whether the actions that write are available.
-//
 // writeOpen is the fresh-clone case — no key, no password, so requireWrite lets
 // everything through. Without it the UI cannot tell "sign in to do this" from
 // "there is nothing to sign in to", and would disable buttons that work.
@@ -416,22 +377,20 @@ api.use((_req, res) => {
   res.status(404).json({ error: "not found" });
 });
 
-/**
- * The only place an unhandled error is allowed to reach the caller.
- *
- * Express 5 forwards a rejected promise from a route to here on its own, so no route
- * needs a try/catch for this to work.
- *
- * Two shapes go out, and the split matters. A BadRequest is the caller's mistake and
- * its message is written to be read by them. Anything else is ours, and the caller
- * gets nothing but "internal error" — Express's default handler would have replied
- * with the stack trace, which in development meant answering a malformed query
- * parameter with the absolute paths of files on this machine.
- *
- * Four arguments, including one that is unused: Express identifies error middleware
- * by arity, so dropping `_next` would quietly turn this into an ordinary handler that
- * never runs.
- */
+// The only place an unhandled error is allowed to reach the caller.
+// Express 5 forwards a rejected promise from a route to here on its own, so no route
+// needs a try/catch for this to work.
+
+// Two shapes go out, and the split matters. A BadRequest is the caller's mistake and
+// its message is written to be read by them. Anything else is ours, and the caller
+// gets nothing but "internal error" — Express's default handler would have replied
+// with the stack trace, which in development meant answering a malformed query
+// parameter with the absolute paths of files on this machine.
+
+// Four arguments, including one that is unused: Express identifies error middleware
+// by arity, so dropping `_next` would quietly turn this into an ordinary handler that
+// never runs.
+
 api.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
   if (err instanceof BadRequest) {
     return res.status(400).json({ error: err.message });
@@ -447,7 +406,6 @@ app.use("/api", api);
 // them at `/` — one port, one deployable. If they don't (dev, or a fresh clone with no
 // build yet), skip entirely and the API runs as it always has; Vite serves the UI on
 // its own port and proxies /api here.
-//
 // The final `app.use` is the SPA fallback: a browser reload on /jobs/abc must get
 // index.html, not a 404, so the client-side router can take over. Anything under /api
 // never reaches it — the router's own 404 above catches that first.
@@ -471,13 +429,13 @@ const server = app.listen(PORT, () => {
     log.error(
       null,
       "neither API_KEYS nor ADMIN_PASSWORD is set — job submission and replay are" +
-        " UNAUTHENTICATED. Generate a value with `npm run key:new` before deploying.",
+      " UNAUTHENTICATED. Generate a value with `npm run key:new` before deploying.",
     );
   } else {
     log.info(
       null,
       `write access: ${KEYS_CONFIGURED ? "API key" : "no key"}` +
-        ` / ${LOGIN_ENABLED ? "operator login" : "no login"}`,
+      ` / ${LOGIN_ENABLED ? "operator login" : "no login"}`,
     );
   }
 
@@ -487,21 +445,19 @@ const server = app.listen(PORT, () => {
     log.error(
       null,
       "SESSION_SECRET is not set — logins will not survive a restart." +
-        " Generate one with `npm run key:new`.",
+      " Generate one with `npm run key:new`.",
     );
   }
 });
 
-/**
- * Finish the requests already in progress, refuse new ones, then stop.
- *
- * Nothing here takes long — the longest request in this API is a page query — so unlike
- * the worker there is no real draining, just the difference between a client getting its
- * response and a client getting a dropped connection. The one that actually mattered
- * before this: a POST /jobs killed between its INSERT and its LPUSH leaves an orphan the
- * sweep only finds a minute later, and the caller never learns whether the job was
- * created, so it submits again.
- */
+// Finish the requests already in progress, refuse new ones, then stop.
+// Nothing here takes long — the longest request in this API is a page query — so unlike
+// the worker there is no real draining, just the difference between a client getting its
+// response and a client getting a dropped connection. The one that actually mattered
+// before this: a POST /jobs killed between its INSERT and its LPUSH leaves an orphan the
+// sweep only finds a minute later, and the caller never learns whether the job was
+// created, so it submits again.
+
 onShutdown(log, async () => {
   // closeIdleConnections() is not optional here, and leaving it out is the usual reason
   // a "graceful" HTTP shutdown appears to hang. server.close() stops accepting NEW

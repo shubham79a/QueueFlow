@@ -80,7 +80,7 @@ async function reapWorker(
     // 2.retrying                   the worker wrote the failure and ZADDed the job into the delayed set, 
     //                              then died before the LREM. The scheduler will promote it when it's due. 
     //                              Pushing it to pending here would make it run early, and then again when the ZSET fires.
-    // 3.running is the normal case — w1 claimed it, was working, died. queued is the tiny window where BLMOVE put the id in 
+    // 3.running is the normal case w1 claimed it, was working, died. queued is the tiny window where BLMOVE put the id in 
     // the list but the claim UPDATE hadn't landed yet. Both need rescuing.
 
     if (["succeeded", "dead", "failed", "retrying"].includes(row.status)) {

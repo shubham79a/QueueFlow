@@ -2,16 +2,12 @@ import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypt
 import type { NextFunction, Request, Response } from "express";
 
 // Who is allowed to WRITE.
-//
 // Reading stays open to everyone — the dashboard has to be viewable without signing in.
 // Creating and replaying jobs do not, and deliver_webhook is the reason: an open POST /jobs
 // means a stranger can make this server send a request to any URL they choose.
-//
 // Two kinds of caller, two proofs:
-//
 //   a machine (cron, another service)  Authorization: Bearer <api key>
 //   a human operator                   a signed session cookie, from the password
-//
 // A key is wrong for the browser — it would have to be pasted into the frontend, where
 // anyone can read it. A cookie is wrong for a cron. Both routes accept either.
 
@@ -32,30 +28,23 @@ const KEY_DIGESTS = API_KEYS.map(sha256);
 // Password — for the operator
 // --------------------------------------------------------------------------
 
-// Stored in plain text, and that is deliberate. This is a deployment secret, like the
-// password already sitting inside DATABASE_URL — not a user record in a table. Hashing
-// protects a password against someone reading the database it lives in, and there is no
+// Stored in plain text, and that is deliberate. This is a deployment secret, like the password already sitting inside DATABASE_URL — 
+// not a user record in a table. Hashing protects a password against someone reading the database it lives in, and there is no
 // such database here: anyone who can read this value can read the whole .env anyway.
-//
-// TRIMMED, for the same reason API_KEYS is, and it was an oversight that it was not.
-// Every hosting dashboard takes secrets in a multi-line textarea — Render's is one —
-// and a value pasted into one carries a trailing newline often enough that the first
-// symptom is "wrong password" against a password that is visibly correct. There is no
-// legitimate secret with leading or trailing whitespace, so nothing is lost by removing
-// it and a whole class of unexplainable login failure goes with it.
+
+// TRIMMED, for the same reason API_KEYS is, and it was an oversight that it was not. Every hosting dashboard takes secrets in a 
+// multi-line textarea — Render's is one — and a value pasted into one carries a trailing newline often enough that the first
+// symptom is "wrong password" against a password that is visibly correct. There is no legitimate secret with leading or trailing whitespace, 
+// so nothing is lost by removing it and a whole class of unexplainable login failure goes with it.
 const ADMIN_PASSWORD = (process.env.ADMIN_PASSWORD ?? "").trim();
 
-/**
- * Signs the session cookie.
- *
- * Falls back to a value generated at boot, which works but means every restart invalidates
- * every session — and with more than one API process, a cookie issued by one is rejected by
- * the others. The startup warning says so; set it in .env.
- */
-// Trimmed too, and this one fails more quietly than the password does. A stray newline
-// here does not produce an error — it just makes a different signing key, so every
-// session issued before the whitespace appeared stops verifying, with nothing in the
-// logs to say why.
+// Signs the session cookie.
+// Falls back to a value generated at boot, which works but means every restart invalidates every session — and with more 
+// than one API process, a cookie issued by one is rejected by the others. The startup warning says so; set it in .env.
+
+// Trimmed too, and this one fails more quietly than the password does. A stray newline here does not produce an error — 
+// it just makes a different signing key, so every session issued before the whitespace appeared stops verifying, 
+// with nothing in the logs to say why.
 const SESSION_SECRET = (process.env.SESSION_SECRET ?? randomBytes(32).toString("hex")).trim();
 
 const SESSION_COOKIE = "qf_session";
@@ -69,12 +58,9 @@ export const KEYS_CONFIGURED = API_KEYS.length > 0;
 export const LOGIN_ENABLED = ADMIN_PASSWORD.length > 0;
 export const SESSION_SECRET_SET = Boolean(process.env.SESSION_SECRET);
 
-/**
- * True when nothing can prove anything — no keys AND no password.
- *
- * In that state the write routes stay open, so a fresh clone runs with no setup. A deploy in
- * that state is a mistake, which is what the startup warning is for.
- */
+// True when nothing can prove anything — no keys AND no password. 
+// In that state the write routes stay open, so a fresh clone runs with no setup. A deploy in
+// that state is a mistake, which is what the startup warning is for.
 export const AUTH_DISABLED = !KEYS_CONFIGURED && !LOGIN_ENABLED;
 
 // --------------------------------------------------------------------------
@@ -85,17 +71,12 @@ function sha256(value: string): Buffer {
   return createHash("sha256").update(value).digest();
 }
 
-/**
- * Compare in constant time.
- *
- * `a === b` returns as soon as two characters differ, so the time taken to answer leaks how
- * much of the secret was right — enough, over many requests, to guess it a character at a
- * time. timingSafeEqual always reads both buffers fully.
- *
- * Compared as SHA-256 digests rather than raw strings because timingSafeEqual throws unless
- * both buffers are the same length, and the length of what was submitted is itself something
- * not to react to.
- */
+// Compare in constant time.
+// `a === b` returns as soon as two characters differ, so the time taken to answer leaks how much of the secret 
+// was right — enough, over many requests, to guess it a character at a time. timingSafeEqual always reads both buffers fully.
+// Compared as SHA-256 digests rather than raw strings because timingSafeEqual throws unless
+// both buffers are the same length, and the length of what was submitted is itself something not to react to.
+
 function sameSecret(a: string, b: string): boolean {
   return timingSafeEqual(sha256(a), sha256(b));
 }
@@ -109,17 +90,14 @@ function isKnownKey(token: string): boolean {
 // The session cookie
 // --------------------------------------------------------------------------
 
-/**
- * A signed token: `<expiry>.<signature>`.
- *
- * Hand-rolled rather than reaching for jsonwebtoken. A JWT is a header, a payload and a
- * signature — and here the header would name an algorithm that never varies and the payload
- * would hold one number. The whole value of a JWT is that a third party can read and verify
- * it; nothing here is a third party.
- *
- * The signature covers the expiry, so a client cannot extend its own session by editing the
- * cookie: any change makes the HMAC stop matching.
- */
+// A signed token: `<expiry>.<signature>`.
+// Hand-rolled rather than reaching for jsonwebtoken. A JWT is a header, a payload and a
+// signature — and here the header would name an algorithm that never varies and the payload
+// would hold one number. The whole value of a JWT is that a third party can read and verify
+// it; nothing here is a third party.
+// The signature covers the expiry, so a client cannot extend its own session by editing the
+// cookie: any change makes the HMAC stop matching.
+
 function issueSession(): string {
   const expiry = String(Date.now() + SESSION_TTL_MS);
   return `${expiry}.${sign(expiry)}`;
@@ -140,12 +118,8 @@ function isValidSession(token: string): boolean {
   return Number(expiry) > Date.now();
 }
 
-/**
- * Read one cookie off the raw header.
- *
- * Express 5 does not parse cookies and this is the only one we set, so five lines here
- * instead of a dependency.
- */
+// Read one cookie off the raw header.
+// Express 5 does not parse cookies and this is the only one we set, so five lines here instead of a dependency.
 function readCookie(req: Request, name: string): string {
   for (const part of (req.headers.cookie ?? "").split(";")) {
     const eq = part.indexOf("=");
@@ -183,12 +157,9 @@ export function clearSessionCookie(res: Response): void {
 // Login attempts
 // --------------------------------------------------------------------------
 
-/**
- * One password on a public URL is guessable given enough tries, and nothing else here slows
- * that down. A Map keyed by IP is not rate limiting for a fleet — it is per-process and
- * resets on restart — but it turns "guess forever" into "guess 5 times per 15 minutes",
- * which is the difference that matters.
- */
+// One password on a public URL is guessable given enough tries, and nothing else here slows
+// that down. A Map keyed by IP is not rate limiting for a fleet — it is per-process and
+// resets on restart — but it turns "guess forever" into "guess 5 times per 15 minutes", which is the difference that matters.
 const MAX_ATTEMPTS = 5;
 const ATTEMPT_WINDOW_MS = 15 * 60 * 1000;
 const attempts = new Map<string, { count: number; firstAt: number }>();
@@ -217,7 +188,7 @@ export function clearFailures(ip: string): void {
   attempts.delete(ip);
 }
 
-/** The password check itself. False when no password is configured — login is then off. */
+// The password check itself. False when no password is configured — login is then off.
 export function isCorrectPassword(password: string): boolean {
   if (!LOGIN_ENABLED || !password) return false;
   return sameSecret(password, ADMIN_PASSWORD);
@@ -227,7 +198,7 @@ export function isCorrectPassword(password: string): boolean {
 // The guard
 // --------------------------------------------------------------------------
 
-/** Guards the routes that change something. Either proof will do. */
+// Guards the routes that change something. Either proof will do.
 export function requireWrite(req: Request, res: Response, next: NextFunction): void {
   if (AUTH_DISABLED) return next();
 

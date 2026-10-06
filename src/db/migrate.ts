@@ -4,15 +4,13 @@ import { dirname, resolve } from "node:path";
 import { createDb } from "../shared/db.js";
 import { createLogger } from "../shared/log.js";
 
-/**
- * Applies db/schema.sql. That is the whole migration system.
- *
- * A real project outgrows this — it has no version tracking, so it can only apply
- * a schema that is safe to re-run, which is why everything in schema.sql is
- * IF NOT EXISTS. What it buys in exchange is that the schema stays a plain SQL
- * file you can read top to bottom, which is the point: the CHECK constraint and
- * the UNIQUE index are things to understand, not things for a tool to hide.
- */
+// Applies db/schema.sql. That is the whole migration system.
+// A real project outgrows this — it has no version tracking, so it can only apply
+// a schema that is safe to re-run, which is why everything in schema.sql is
+// IF NOT EXISTS. What it buys in exchange is that the schema stays a plain SQL
+// file you can read top to bottom, which is the point: the CHECK constraint and
+// the UNIQUE index are things to understand, not things for a tool to hide.
+
 const log = createLogger("db");
 
 const here = dirname(fileURLToPath(import.meta.url));
