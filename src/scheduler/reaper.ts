@@ -5,30 +5,20 @@ import { query } from "../shared/db.js";
 import type { Logger } from "../shared/log.js";
 import { isUuid } from "../shared/types.js";
 
-// The reaper: return the jobs of a worker that is no longer alive.
-// This helps the system crash survivable. BLMOVE move job from pending to the `queueflow:processing:<workerId>`.
-// when process died, the heartbeat made "is that worker still alive?". If alive fine else push job back to pending.
-// But heartbeat not always give you correct alive info, sometime wrong too. this is not fixable.
-// Missing heartbeat worker has not spoken recently, which doesn't means worker is dead.
-// Using TTL help to avoid those error still not 100% correct.
+// Recover jobs held by workers whose heartbeat has expired.
+// A missing heartbeat can be a false failure signal, so recovery may cause
+// duplicate execution. That is acceptable with at-least-once processing;
+// lease fencing prevents stale workers from committing old DB state.
 
-// So by design: w1 gets marked dead while j1 is still running, the reaper pushes j1 back to
-// pending, w2 picks it up and runs it too. The job runs twice — that part we accept. What the
-// lease_id prevents is both of them RECORDING it: only the latest claim can write.
-
-// How old a `queued` row must be before the sweep treats it as lost rather than as merely waiting.
-
-// MUST COMFORTABLY EXCEED NORMAL QUEUE WAIT. A backlog where jobs legitimately sit for two minutes, 
-// with this set to sixty seconds, would have the sweep re-pushing ids that are already in the queue.
-
+// Minimum age before a queued row is treated as an orphan.
+// Must exceed normal queue wait time to avoid requeueing legitimate backlog.
 const ORPHAN_AGE_S = Math.max(5, Number(process.env.ORPHAN_AGE_S ?? 60));
 
-// Cap per pass, so one catastrophe cannot monopolise the loop.
+// Limit recovery work per pass so a large failure cannot monopolize the loop.
 const BATCH = 100;
 
-// Every job id Redis is currently holding, across `pending` and every worker's processing list.
-// Reading whole lists is not free, which is why the orphan sweep below builds this
-// only when it has already found candidate rows — on a healthy system, never.
+// Collect job IDs currently held by pending or any worker processing list.
+// Only called when orphan candidates exist because reading whole lists is expensive.
 async function idsHeldByRedis(redis: Redis): Promise<Set<string>> {
   const held = new Set(await redis.lrange(KEYS.pending, 0, -1));
 
@@ -39,7 +29,7 @@ async function idsHeldByRedis(redis: Redis): Promise<Set<string>> {
   return held;
 }
 
-// Return everything one dead worker was holding. Returns how many jobs moved.
+// Recover all jobs held by one dead worker.
 async function reapWorker(
   redis: Redis,
   db: Pool,
@@ -49,12 +39,12 @@ async function reapWorker(
 ): Promise<number> {
   let reaped = 0;
 
-  // Every branch below either LREMs or LMOVEs, so the list shrinks by one on each pass and this 
-  // always terminates — including when a second scheduler is racing for the same entries.
+  // Each iteration removes or moves one entry, so the processing list shrinks and the loop terminates.
   while (true) {
     const jobId = await redis.lindex(key, -1);
     if (jobId === null) break;
 
+    // Remove malformed Redis entries instead of sending invalid IDs into recovery.
     if (!isUuid(jobId)) {
       await redis.lrem(key, -1, jobId);
       continue;
@@ -67,30 +57,26 @@ async function reapWorker(
     );
     const row = rows[0];
 
+    // Redis has an ID with no durable Postgres row, so it cannot be recovered safely.
     if (!row) {
       log.error(jobId, `held by dead worker ${workerId} but has no row — discarded`);
       await redis.lrem(key, -1, jobId);
       continue;
     }
 
-    // ALREADY ACCOUNTED FOR. Two different cases, both meaning "somebody else has
-    // this job now, and the id in this list is just litter":
-    // 1.succeeded / dead / failed  the worker recorded the outcome and then died before LREM. Requeueing
-    //                              would re-run a job that has already finished.
-    // 2.retrying                   the worker wrote the failure and ZADDed the job into the delayed set, 
-    //                              then died before the LREM. The scheduler will promote it when it's due. 
-    //                              Pushing it to pending here would make it run early, and then again when the ZSET fires.
-    // 3.running is the normal case w1 claimed it, was working, died. queued is the tiny window where BLMOVE put the id in 
-    // the list but the claim UPDATE hadn't landed yet. Both need rescuing.
-
+    // These states were already handled elsewhere, so the Redis entry is stale.
+    // 1. succeeded/dead/failed: outcome was recorded before the worker crashed.
+    // 2. retrying: failure was recorded and the job was placed in the delayed ZSET.
+    // 3. running and queued are recoverable: the worker may have died during execution,
+    // or the Redis move may have happened before the DB claim completed.
     if (["succeeded", "dead", "failed", "retrying"].includes(row.status)) {
       await redis.lrem(key, -1, jobId);
       log.info(jobId, `released from dead worker ${workerId} — already ${row.status}`);
       continue;
     }
 
-    // The poison-pill cap. attempts was incremented at claim time, so this crash already counted. 
-    // If it's used up its budget → mark dead in Postgres, remove the id. Don't push it back — a job that kills every worker it lands on must stop somewhere.
+    // The attempt was already counted when claimed. If the retry budget is exhausted,
+    // mark the job dead instead of sending it through the worker loop again.
     if (row.attempts >= row.max_attempts) {
       await query(
         db,
@@ -109,17 +95,17 @@ async function reapWorker(
       continue;
     }
 
-    // Row first, then the move. If the id hit pending while the row still said 'running',
-    // the next worker's claim (WHERE status IN queued/retrying) would fail and drop the job.
-    // started_at cleared — it's back to waiting. attempts kept — the crash was a real attempt.
-    // lease_id left alone on purpose: if w1 was slow, not dead, and finishes first, it can still
-    // record its result; the next claim reissues the lease anyway.
-    // LMOVE tail-to-tail puts the rescued job at the front of pending — it's waited longest.
+    // Update Postgres before moving the Redis entry so another worker sees the job
+    // as queued before it can claim it.
+    // Keep the attempt count because the crashed execution consumed an attempt.
+    // The next claim gets a fresh lease, so a stale worker cannot commit old state.
     await query(
       db,
       `UPDATE jobs SET status = 'queued', started_at = NULL WHERE id = $1`,
       [jobId],
     );
+    // Atomically move the rescued job back to pending.
+    // RIGHT → RIGHT places it at the front of pending because it has already waited.
     await redis.lmove(key, KEYS.pending, "RIGHT", "RIGHT");
 
     log.info(

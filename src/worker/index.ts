@@ -10,8 +10,7 @@ import { hostname } from "node:os";
 import { isUuid, rowToJob, type JobRow } from "../shared/types.js";
 import { handlers } from "./handlers.js";
 
-// Falls back to the hostname rather than a fixed "w1" because of how this is deployed: in a container 
-// the hostname is the container id, so `--scale worker=3` gives three distinct ids for free. 
+// Use an explicit worker ID when provided; otherwise use the container hostname.
 const WORKER_ID = process.env.WORKER_ID || hostname();
 
 // How many jobs this ONE process may have in flight at once.
@@ -25,17 +24,12 @@ const WORKER_ID = process.env.WORKER_ID || hostname();
 
 const CONCURRENCY = Math.max(1, Number(process.env.CONCURRENCY ?? 1));
 
-// Switch for testing purposes, to see what happens if a worker is allowed to write to a job it no longer owns.
+// Enable/disable lease fencing for testing stale-worker writes.
 const FENCING = (process.env.FENCING ?? "on").toLowerCase() !== "off";
 
-// How long a stopping worker waits for its in-flight jobs to finish before giving up.
-// THIS MUST STAY BELOW THE ORCHESTRATOR'S GRACE PERIOD — `stop_grace_period` in compose,
-// `terminationGracePeriodSeconds` in Kubernetes, 10s by default in both. Docker sends
-// SIGTERM, waits that long, then SIGKILLs. If this number is the larger of the two we
-// get killed mid-drain and never reach the cleanup at the end, which is worse than not
-// draining at all: the jobs are stranded anyway AND the heartbeat is left behind, so
-// recovery waits out the full TTL.
-// 25s against the 30s grace period set for the worker in docker-compose.prod.yml.
+// Maximum time to wait for in-flight jobs during shutdown.
+// Must stay below the orchestrator's termination grace period so the worker
+// can finish draining before it is force-killed.
 const SHUTDOWN_TIMEOUT_MS = Math.max(0, Number(process.env.SHUTDOWN_TIMEOUT_MS ?? 25_000));
 
 // How often the drain re-checks whether the last job has finished.
@@ -45,13 +39,10 @@ const log = createLogger(WORKER_ID);
 
 // BRPOP/BLMOVE behaves differently from a normal queue pop. It return jobs if present else wait infinitely for one to arrive. 
 // If BLMOVE not used we have to ping in every interval to see that job arrived or not. which is costly and adds latency.
-
 const blocking = createRedis(`${WORKER_ID}:blocking`, log);
 
-// Two connections — see redis.ts. `blocking` sits on BLMOVE and can do nothing, cannot carry another command
-// else while it waits; `scheduling` carries everything else: heartbeat, LREM, ZADD.
-// So: one for blocking and other for everything else. The second one earns its keep (heartbeats). 
-
+// Separate connection for heartbeat, LREM, ZADD, and other non-blocking commands.
+// The blocking connection cannot be used for these while waiting on BLMOVE.
 const scheduling = createRedis(`${WORKER_ID}:scheduling`, log);
 
 // Postgres gets a pool rather than a single connection, because nothing here parks a connection indefinitely the way BLMOVE does.
@@ -61,7 +52,7 @@ const db = createDb(WORKER_ID, log);
 const PROCESSING = KEYS.processing(WORKER_ID);
 
 async function processOne(jobId: string): Promise<void> {
-  // Redis stores only ID. Based on redis ID, we will fetch the job row from Postgres.
+  // Redis stores only the job ID; fetch the durable job data from Postgres.
   const rows = await query<JobRow>(
     db,
     `SELECT id, type, payload, status, attempts, max_attempts, last_error,
@@ -78,8 +69,6 @@ async function processOne(jobId: string): Promise<void> {
   }
   const job = rowToJob(row);
 
-  // The row has three timestamps: started_at - created_at is queue wait (a property of this system), 
-  // completed_at - started_at is execution time (a property of the work). Measuring them together is the standard benchmarking mistake.
   // 1. attempts is incremented in the DB here, so the crashes still counts as an attempt.
   // 2. check that jobs is claimable or not.
   // 3. lease_id = gen_random_uuid(), so that worker can own the job and if previous owned by other worker, it cannot write to the job row anymore. 
@@ -114,11 +103,9 @@ async function processOne(jobId: string): Promise<void> {
     try {
       await client.query("BEGIN");
 
-      // update job first it will return a row and then we will check the rowCount. If rowCount is 0 means lease_id is changed by
-      // other worker means you don't own it anymore. so we will not insert into job_effects and do rollback.
-      // If rowCount is 1 means worker own the job and we insert into the job_effects about what happens to the job.
-      // `$3::boolean IS FALSE OR ...` is the FENCING switch, passed as a parameter rather than spliced into the SQL text. 
-      // Same discipline as everywhere else here — the query string is a constant, and values travel separately.
+      // Record success only if this worker still owns the current lease.
+      // Insert the job effect in the same transaction so the state change and
+      // recorded effect either both commit or both roll back.
       const settled = await client.query(
         `UPDATE jobs SET status = 'succeeded', completed_at = now()
           WHERE id = $1 AND ($3::boolean IS FALSE OR lease_id = $2)`,
@@ -139,16 +126,13 @@ async function processOne(jobId: string): Promise<void> {
       await client.query("ROLLBACK");
       throw err;
     } finally {
-      // Always return it to the pool. A leaked client is a connection the pool can
-      // never hand out again, and five of those deadlock this worker permanently.
+      // Always return the database client to the pool.
       client.release();
     }
 
     if (fenced) {
-      // Worker don't own the job anymore, so it cannnot record the outcome. 
-      // This means either worker is holding wrong lease_id or the job is transferred to other worker. 
-      // That is the honest shape of the guarantee: at-least-once delivery, plus a consumer that recognises a repeat,
-      // which together produce an exactly-once EFFECT. Exactly-once delivery was never on the table.
+      // The worker finished the work but lost ownership before recording the result.
+      // Do not write a stale outcome; another worker now owns the job.
       log.error(
         job.id,
         `fenced out — finished the work, but the lease was reissued while it ran.` +
@@ -163,9 +147,8 @@ async function processOne(jobId: string): Promise<void> {
     const message = err instanceof Error ? err.message : String(err);
 
     if (job.attempts >= job.maxAttempts) {
-      // Out of attempts. 'dead' is terminal, and the dead-letter queue. A DLQ is an inbox, not a graveyard: 
-      // someone reads it, fixes the cause, and replays. That is what POST /jobs/:id/replay is for.
-
+      // Exhausted attempts make the job dead.
+      // Dead jobs can later be inspected and replayed by an operator.
       const buried = await query<{ id: string }>(
         db,
         `UPDATE jobs SET status = 'dead', last_error = $2, completed_at = now(),
@@ -187,9 +170,8 @@ async function processOne(jobId: string): Promise<void> {
     const delayMs = nextDelayMs(job.attempts);
     const runAt = new Date(Date.now() + delayMs);
 
-    // Row first, then the sorted set — the same ordering as the API's insert-then-enqueue, for the same reason. 
-    // A crash between the two leaves a 'retrying' row with a next_run_at that a query can find. Reversed,
-    // it would leave a scheduled id whose row still says 'running', and nothing would reconcile it.
+    // Persist the retry state in Postgres before adding the job to the delayed set.
+    // If the process crashes between these writes, the database still records that the job needs recovery.
     const parked = await query<{ id: string }>(
       db,
       `UPDATE jobs SET status = 'retrying', last_error = $2, next_run_at = $3
@@ -198,15 +180,8 @@ async function processOne(jobId: string): Promise<void> {
       [job.id, message, runAt, lease, FENCING],
     );
 
-    // FENCED, AND THIS IS THE BRANCH THAT MATTERS MOST.
-    // Without the check above, a worker that had been declared dead and whose handler then failed would
-    // happily ZADD the job into the delayed set — while another worker was in the middle of running it successfully.
-    // The scheduler would promote it when the backoff elapsed and the job would run a THIRD
-    // time, scheduled by a process that had no right to speak for it.
-
-    // Returning before the ZADD is what stops a stale worker injecting phantom
-    // retries into a job somebody else is handling.
-
+    // Only the current lease owner may schedule the retry.
+    // A stale worker must not inject a retry after another worker has taken ownership.
     if (parked.length === 0) {
       log.error(
         job.id,
@@ -214,12 +189,9 @@ async function processOne(jobId: string): Promise<void> {
       );
       return;
     }
-    // ZADD, not sleep().
-    // sleeping will hold worker for some constant time waiting, worker killed during sleep would take retry with it (lost). 
-    // Parking the job in Redis return job immediately, survives this process entirely, and lets ANY worker run the job once the scheduler promotes it.
-    // The score is the epoch-ms it becomes due, which is what makes
-    // ZRANGEBYSCORE 0 <now> the whole of "what is due?".
-
+    // Store the retry in the delayed sorted set instead of sleeping.
+    // The job survives worker failure and can be promoted by any scheduler.
+    // The score is the timestamp when the job becomes due.
     await scheduling.zadd(KEYS.delayed, runAt.getTime(), job.id);
 
     log.error(
@@ -252,11 +224,10 @@ const loopExit = new Promise<void>((resolve) => { loopHasExited = resolve; });
 // If an alive key exists under our name, wait for it to expire (it's probably our own stale one
 // from the process that just died). If it's STILL there after TTL+1s, another process is using
 // this WORKER_ID — don't touch the list, just warn.
-
 async function recoverOwnProcessing(): Promise<void> {
   const aliveKey = KEYS.alive(WORKER_ID);
 
-  // Wait slightly longer than the heartbeat TTL for the old process to expire.
+  // Give the previous process time for its heartbeat to expire.
   const waitMs = TTL_S * 1000 + 1_000;
   const deadline = Date.now() + waitMs;
 
@@ -350,25 +321,24 @@ let heartbeat: { stop(): void } | null = null;
 
 // Startup order: recover stranded jobs, start heartbeat, then accept new work.
 async function main(): Promise<void> {
-  // THIS ORDER IS LOAD-BEARING.
-  //   1. recover — must run while no alive key exists, since the absence of that
-  //      key is exactly what proves no other process owns this WORKER_ID.
-  //   2. heartbeat — must land BEFORE the first job is taken. A worker holding a
-  //      job while looking dead is a worker the reaper will rob.
-  //   3. take work.
-  // Swap the first two and a restarting worker would refuse to recover its own
-  // stranded jobs, because it would find its own heartbeat and conclude a rival was using its name.
+  // Startup order matters:
+  // 1. Recover stranded jobs.
+  // 2. Start the heartbeat before taking new work.
+  // 3. Register shutdown handling.
+  // 4. Start processing jobs.
+  // The heartbeat must exist before a job is taken, otherwise the reaper could
+  // mistake this worker for dead and recover a job it is actively processing.
   await recoverOwnProcessing();
   heartbeat = await startHeartbeat(scheduling, WORKER_ID, log);
 
   // REGISTERED AFTER THE HEARTBEAT, NOT BEFORE, and this ordering is a correctness matter rather than tidiness.
-  //
+  
   // The drain ends by deleting worker:<WORKER_ID>:alive, which is only ours to delete
   // once startHeartbeat has written it. Earlier than this, recoverOwnProcessing may be
   // sitting out its TTL_S + 1s wait on a key belonging to ANOTHER live process using the
   // same WORKER_ID — the case GAP-5.5 describes. Draining there would delete that
   // process's heartbeat, and the reaper would rob a worker that is running perfectly well.
-  //
+  
   // The cost is a window during startup where SIGTERM is still ignored, so a stop issued
   // during recovery waits out the orchestrator's grace period and ends in SIGKILL.
   // Harmless — nothing is in flight yet, which is exactly why there is nothing to drain.

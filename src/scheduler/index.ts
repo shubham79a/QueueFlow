@@ -49,7 +49,6 @@ async function promoteDue(): Promise<number> {
     // due to atomicity. No lock, no leader election — the same atomicity that stops two workers taking the same job 
     // from the pending list. Doing this the obvious way instead — read, then push, then remove — would
     // let both schedulers push the id, and the job would run twice.
-
     const claimed = await redis.zrem(KEYS.delayed, jobId);
     if (claimed !== 1) continue;
 
