@@ -1,9 +1,9 @@
-// This is test webhook receiver / failure simulator. Its purpose is actually valuable because it lets us demonstrate 
-// behavior from the perspective of an external service rather than relying only on your queue's own database records.
-// Run it with: npm run dev:receiver
-
 import express from "express";
 import { createLogger } from "../shared/log.js";
+
+// Test webhook receiver and failure simulator.
+// Used to demonstrate QueueFlow behavior from an external service's perspective.
+// Run with: npm run dev:receiver
 
 const PORT = Number(process.env.RECEIVER_PORT ?? 4001);
 
@@ -11,54 +11,39 @@ const log = createLogger("recv");
 const app = express();
 app.use(express.json());
 
-// How many times each job has been delivered here.
-// This is the second half of the correctness story. job_effects records what the WORKER believes happened; 
-// this records what the outside world actually received. When those two disagree, the disagreement is the 
-// bug — and this counter is what shows a webhook being delivered twice.
+// Count how many times each job was delivered.
 const deliveries = new Map<string, number>();
 
-// Which jobs have actually had their EFFECT applied here.
-// The distinction between this and `deliveries` is the entire point of the idempotent endpoint below. `deliveries` 
-// counts requests that ARRIVED; this counts requests that CHANGED SOMETHING. A receiver that keeps a record like this
-// turns a repeated delivery into a no-op, which is the only thing anywhere that can make a repeat harmless — 
-// because by the time a duplicate is sent, the sender has already lost the ability to prevent it.
+// Track jobs whose external effect has already been applied.
 const applied = new Set<string>();
 
 function record(req: express.Request): { jobId: string; count: number } {
-  // Real webhook senders identify each delivery this way — GitHub sends
-  // X-GitHub-Delivery, Stripe sends an idempotency key on the request.
+  // Use the stable QueueFlow job ID to identify deliveries.
   const jobId = req.get("X-QueueFlow-Job-Id") ?? "unknown";
   const count = (deliveries.get(jobId) ?? 0) + 1;
   deliveries.set(jobId, count);
   return { jobId, count };
 }
 
-// How long to take before answering, from `?delayMs=`.
-// A receiver that works but is SLOW is a different thing from one that is down or hung, and it is the interesting one: 
-// it is what keeps a worker busy long enough to be mistaken for dead. Capped so a typo cannot wedge the process.
+// Read an optional response delay, capped at 60 seconds.
 function delayFrom(req: express.Request): number {
   const raw = Number(req.query.delayMs);
   return Number.isFinite(raw) && raw > 0 ? Math.min(raw, 60_000) : 0;
 }
 
-// Always succeeds. Add ?delayMs=N to make it succeed slowly.
+// Always succeeds. Use ?delayMs=N to simulate a slow but healthy receiver.
 app.post("/hook", (req, res) => {
   const { jobId, count } = record(req);
   const attempt = req.get("X-QueueFlow-Attempt") ?? "?";
   log.info(jobId, `received (attempt ${attempt}, delivery #${count}) ${JSON.stringify(req.body)}`);
   if (count > 1) log.error(jobId, `DUPLICATE DELIVERY — this job has now arrived ${count} times`);
 
-  // Counted on arrival, answered late — so a delivery that is still in flight has
-  // already been recorded. That ordering matters: it is what lets a test see the
-  // second delivery before the first has been replied to.
+  // Record the delivery before responding so in-flight duplicates are observable.
   setTimeout(() => res.status(200).json({ ok: true, received: count }), delayFrom(req));
 });
 
-// Always succeeds, and applies its effect AT MOST ONCE per job id.
-// Applies the effect at most once per job ID.
-// The job may be delivered multiple times, but the receiver remembers the job ID and ignores duplicate deliveries.
-// QueueFlow provides at-least-once delivery; this idempotent consumer prevents duplicate external effects.
-
+// Always succeeds and applies the external effect at most once per job ID.
+// Multiple deliveries are accepted, but duplicates become no-ops.
 app.post("/hook/idempotent", (req, res) => {
   const { jobId, count } = record(req);
   const delay = delayFrom(req);
@@ -69,34 +54,27 @@ app.post("/hook/idempotent", (req, res) => {
     return;
   }
 
-  // Claimed BEFORE the delay, not after.
-  // If the id were only recorded once the work finished, two deliveries arriving while the first was still in 
-  // progress would both find the set empty and both apply. That is the same read-then-write race the 
-  // API's replay endpoint avoids by putting its condition inside the UPDATE, and a receiver processing slowly
-  // is exactly when duplicates show up.
+  // Claim the job before the delay so concurrent duplicate deliveries cannot both apply it.
   applied.add(jobId);
   log.info(jobId, `applied (delivery #${count}) ${JSON.stringify(req.body)}`);
   setTimeout(() => res.status(200).json({ ok: true, duplicate: false, received: count }), delay);
 });
 
-// Always returns 500 — the receiver is broken.
+// Always returns 500 to simulate a receiver outage.
 app.post("/hook/down", (req, res) => {
   const { jobId } = record(req);
   log.error(jobId, "responding 500 (simulated outage)");
   res.status(500).json({ error: "simulated outage" });
 });
 
-// Never answers in time — the receiver is hung, not down. A different failure.
+// Keeps the connection open for 60 seconds to simulate a hung receiver.
 app.post("/hook/slow", (req, res) => {
   const { jobId } = record(req);
   log.info(jobId, "holding the connection open for 60s (simulated hang)");
   setTimeout(() => res.status(200).json({ ok: true }), 60_000);
 });
 
-// Fails the first N deliveries of a given job, then succeeds.
-// This is the shape of a real transient failure — a service that was restarting
-// and is now fine. It is the retry demonstration: watch attempts climb 1, 2, 3 with
-// widening gaps, and then succeed.
+// Fails the first N deliveries, then succeeds to demonstrate retries.
 app.post("/hook/flaky/:failures", (req, res) => {
   const { jobId, count } = record(req);
   const failures = Number(req.params.failures);
@@ -110,11 +88,7 @@ app.post("/hook/flaky/:failures", (req, res) => {
   return res.status(200).json({ ok: true, recoveredAfter: failures });
 });
 
-// What has actually arrived here. The outside world's version of events.
-// `total` counts requests that arrived; `applied` counts jobs whose effect was
-// carried out. On /hook those two numbers are the same and both climb with every
-// duplicate. On /hook/idempotent they diverge, and the gap between them is the
-// duplicate being absorbed.
+// Show what the external service actually received and applied.
 app.get("/deliveries", (_req, res) => {
   res.json({
     total: [...deliveries.values()].reduce((a, b) => a + b, 0),
@@ -124,6 +98,7 @@ app.get("/deliveries", (_req, res) => {
   });
 });
 
+// Clear the simulated receiver state.
 app.delete("/deliveries", (_req, res) => {
   deliveries.clear();
   applied.clear();
