@@ -8,42 +8,18 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
+  Dialog, DialogContent, DialogDescription,
+  DialogFooter, DialogHeader, DialogTitle,
 } from '@/components/ui/dialog'
 import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
+  Select, SelectContent, SelectItem,
+  SelectTrigger, SelectValue,
 } from '@/components/ui/select'
 
 // Create a job from the browser.
-//
-// Typed fields rather than a JSON box: the shortest path to a running job should be
-// "pick a type, press Create". Asking a visitor to hand-write valid JSON means their
-// first experience of the project can be a syntax error.
-//
-// A DIALOG RATHER THAN A CARD IN THE PAGE. It used to open inline above the table,
-// which pushed every row down the moment you pressed New job — so the thing you were
-// about to add work to jumped out from under you, and on a phone the table left the
-// screen entirely. It also had to compete with the table for width, which is why the
-// fields were laid out in a cramped wrapping row.
-//
-// Defaults are chosen to work as-is. The webhook one points at the local test
-// receiver, which is what `npm run dev:receiver` starts.
-// The webhook url starts EMPTY rather than pointing at 127.0.0.1:4001.
-//
-// That default was the local test receiver, which is right on a laptop running
-// `npm run dev:receiver` and wrong everywhere else: on a deployed instance it is a
-// localhost address in front of anyone who opens the form, and pressing Create sends the
-// job on a five-attempt round trip to nothing. The server now also refuses private
-// targets outright, so the old default would have been rejected at the boundary anyway.
+// Use typed fields instead of requiring users to write JSON.
+// The form opens in a dialog so it doesn't shift the jobs table.
+// Webhook URLs start empty to avoid defaulting to localhost.
 const DEFAULTS: Record<JobType, Record<string, string>> = {
   sleep: { ms: '5000' },
   always_fail: { message: 'this job always fails' },
@@ -120,16 +96,6 @@ export default function NewJobForm({
           </DialogDescription>
         </DialogHeader>
 
-        {/* A column, not a wrapping row. Inline in the page the fields had to share
-            width with the table and ended up jammed side by side; a dialog has one
-            job, so each field gets a full line and the same width at every size. */}
-        {/* min-w-0 IS LOad-BEARING, not tidiness.
-            DialogContent is a grid, and a grid item defaults to min-width:auto — it
-            refuses to shrink below the intrinsic width of its content. The payload
-            preview below is one long unbreakable line of JSON, so it set that width and
-            the whole form grew past the dialog's border, taking the inputs and the
-            buttons with it. min-w-0 lets the item shrink and the preview handle its own
-            overflow. */}
         <form onSubmit={submit} className="min-w-0 space-y-5">
           <div className="space-y-2.5">
             <Label htmlFor="f-type">type</Label>

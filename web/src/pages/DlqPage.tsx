@@ -7,11 +7,7 @@ import { Card } from '@/components/ui/card'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 
-// Jobs that ran out of attempts.
-//
-// There is no separate Redis list for these — the dead-letter queue is just
-// `WHERE status = 'dead'`. A second copy of that fact could disagree with the row
-// holding the error and the timings, so there is only the row.
+// Dead jobs are stored as PostgreSQL rows with status='dead'; no separate DLQ exists.
 export default function DlqPage() {
   const jobs = useJobList('dead')
 
@@ -32,11 +28,7 @@ export default function DlqPage() {
         <div className="overflow-x-auto">
           <Table>
             <TableHeader>
-              {/* Columns drop out as the screen narrows, same as the jobs table — but
-                  the priority is different. There, the timings go first because they are
-                  the reason to open a job. Here you came to read the error and press
-                  Replay, so those two survive to the narrowest width and everything
-                  describing the job goes instead. */}
+              {/* Keep error and replay visible on narrow screens. */}
               <TableRow>
                 <TableHead>id</TableHead>
                 <TableHead className="hidden sm:table-cell">type</TableHead>
@@ -81,12 +73,7 @@ export default function DlqPage() {
                   <TableCell className="text-muted-foreground hidden text-sm md:table-cell">
                     {job.completedAt ? timeAgo(job.completedAt) : ''}
                   </TableCell>
-                  {/* Errors get long. One line here with the whole thing in the
-                      tooltip, and the full text on the detail page.
-                      The cap has to be narrower than the viewport or truncate has
-                      nothing to truncate against and the row pushes the table wider
-                      than the screen — max-w-md is 28rem, which is already wider than
-                      a 390px phone. */}
+                  {/* Truncate long errors; full text is available on hover and detail view. */}
                   <TableCell
                     className="text-bad max-w-44 truncate font-mono text-xs sm:max-w-xs lg:max-w-md"
                     title={job.lastError ?? ''}

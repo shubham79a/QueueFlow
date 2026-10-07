@@ -1,23 +1,19 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { getMe, login, logout } from './api/auth.ts'
 
-// Auth state, without a context provider.
-//
-// The query cache is already shared across the whole app, so ['me'] IS the shared state —
-// every component calling useAuth() reads the same cached answer and re-renders together
-// when it changes. A provider would be a second copy of something React Query already has.
+// Shared auth state lives in the React Query cache.
 export function useAuth() {
   const qc = useQueryClient()
 
   const me = useQuery({ queryKey: ['me'], queryFn: getMe })
 
-  // On success, invalidate ['me'] so the header re-reads the new state. Feature 5's
-  // buttons will read the same flag.
+  // Refresh auth state after login.
   const signIn = useMutation({
     mutationFn: login,
     onSuccess: () => qc.invalidateQueries({ queryKey: ['me'] }),
   })
 
+  // Refresh auth state after logout.
   const signOut = useMutation({
     mutationFn: logout,
     onSuccess: () => qc.invalidateQueries({ queryKey: ['me'] }),
@@ -29,9 +25,7 @@ export function useAuth() {
   return {
     authenticated,
     loginEnabled: me.data?.loginEnabled ?? false,
-    // What the action buttons check. Mirrors requireWrite on the server: a session,
-    // or a server with no auth configured at all. (An API key is the third way in,
-    // but a browser never holds one.)
+    // Mirrors server write access for UI controls.
     canWrite: authenticated || writeOpen,
     ready: me.isSuccess,
     signIn,

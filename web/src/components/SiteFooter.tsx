@@ -1,23 +1,8 @@
 const REPO = 'https://github.com/shubham79a/QueueFlow'
 const AUTHOR = 'https://github.com/shubham79a'
 
-// The year the project was built, written down rather than computed from new Date().
-//
-// A footer that always shows the current year is claiming the work is current, which
-// stops being true the moment you stop touching it.
 const YEAR = '2026'
 
-// One line, two facts.
-//
-// IT ONLY CARRIES WHAT THE HEADER DOES NOT. The first version repeated Jobs, Workers
-// and DLQ down here — links that already sit in a sticky header three centimetres
-// away, visible on every scroll position of every page. It also repeated the tagline
-// from the landing page hero. That is the default shape of a footer rather than a
-// considered one, and it made the useful part (who made this, where is the code) the
-// smallest text on the page.
-//
-// What the header genuinely lacks is a way out to the source and any statement of
-// authorship, so that is all this is.
 export default function SiteFooter() {
   return (
     <footer className="mt-16 border-t">

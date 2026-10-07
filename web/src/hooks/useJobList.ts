@@ -6,43 +6,21 @@ import type { JobStatus } from '@/types'
 const PAGE_SIZE = 50
 const REFRESH_MS = 2000
 
-/**
- * A paged, self-refreshing list of jobs. Shared by the Jobs page and the DLQ, which
- * differ only in whether a status filter is set.
- *
- * useInfiniteQuery rather than useQuery because the answer is several pages rather
- * than one. It keeps them as a list of pages and, on each refetch, re-fetches every
- * loaded page in order — recomputing each cursor from the page before it. So a job
- * moving from `running` to `dead` three pages down still updates, and rows shifting
- * between pages stays coherent.
- *
- * New jobs land at the top because page one is fetched with no cursor, which always
- * means "the newest N".
- */
+// Fetch paginated jobs with automatic refresh.
 export function useJobList(status: JobStatus | '' = '') {
   const query = useInfiniteQuery({
-    // The status is part of the key, so switching the filter is a separate cached
-    // list — flipping back shows the old rows instantly while fresh ones load.
+    // Keep filtered and unfiltered lists in separate caches.
     queryKey: ['jobs', status],
     queryFn: ({ pageParam }) => listJobs(status, pageParam, PAGE_SIZE),
-    // undefined means "no cursor", which the API reads as "start at the newest".
+    // Start with the newest jobs.
     initialPageParam: undefined as string | undefined,
-    // Returning undefined is how hasNextPage becomes false. The server sends null
-    // once the page it just returned was the last one.
+    // Continue until the server returns no next cursor.
     getNextPageParam: (last) => last.nextCursor ?? undefined,
+    // Refresh the loaded pages every 2 seconds.
     refetchInterval: REFRESH_MS,
   })
 
-  /**
-   * How many there are in total, for "showing 50 of 321".
-   *
-   * Taken from the health endpoint's status tally rather than a COUNT(*) of its own:
-   * that query already runs for the stat cards, and a count on every poll of every
-   * open tab is exactly the thing keyset pagination was chosen to avoid.
-   *
-   * It is therefore a count of ROWS BY STATUS, which is what both callers want — the
-   * DLQ wants dead, the unfiltered list wants everything.
-   */
+  // Use health status counts for the total instead of an extra COUNT query.
   const health = useQuery({ queryKey: ['health'], queryFn: getHealth, refetchInterval: 5000 })
   const tally = health.data?.jobs
   const total = tally
@@ -52,8 +30,7 @@ export function useJobList(status: JobStatus | '' = '') {
     : undefined
 
   return {
-    // pages is an array of pages, not a flat list. Keeping them separate is what lets
-    // a refetch replace page one without discarding pages two and three.
+    // Flatten the loaded pages into rows for the UI.
     rows: query.data?.pages.flatMap((p) => p.jobs) ?? [],
     total,
     isPending: query.isPending,

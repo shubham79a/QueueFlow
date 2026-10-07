@@ -7,11 +7,7 @@ import { Card } from '@/components/ui/card'
 
 const REPO = 'https://github.com/shubham79a/QueueFlow'
 
-// The three things the system claims, each with the mechanism that backs it.
-//
-// Claims without mechanisms are marketing. Every one of these names the specific
-// Redis or Postgres operation that makes it true, because the mechanism is the
-// interesting part and it is what someone reading this will want to check.
+// Core reliability guarantees and their mechanisms.
 const GUARANTEES = [
   {
     title: 'A job is never in transit',
@@ -27,7 +23,7 @@ const GUARANTEES = [
   },
 ]
 
-// Numbers from `npm run bench` and test/chaos.test.ts, quoted as measured.
+// Benchmark and chaos-test results.
 const MEASURED = [
   { value: '1,039', unit: 'jobs/s', note: '3 workers × 20 concurrency, 1 ms jobs' },
   { value: '320', unit: 'jobs killed', note: '8 rounds of random SIGKILL — 0 lost, 0 duplicated' },
@@ -36,44 +32,19 @@ const MEASURED = [
 
 export default function HomePage() {
   return (
-    // NARROWER THAN THE OPERATOR VIEWS, and deliberately so.
-    //
-    // The shell caps at max-w-7xl because the jobs table has seven columns and the DLQ
-    // shows error strings that want every pixel — width earns its keep there. This page
-    // is prose and cards, and the same width makes a three-card row 415px wide for two
-    // sentences of text. 5xl brings that to about 330px, which is the shape a short
-    // paragraph actually wants.
-    // max-w-4xl, not 5xl. The hero text is capped at max-w-2xl for readability, so a
-    // wider column leaves a growing strip of nothing to its right while the card rows
-    // below run the full width — the eye reads that as the page being lopsided rather
-    // than as deliberate left alignment. 4xl keeps the text block and the card rows
-    // close enough in width to look like one column.
-    //
-    // py is small because <main> already applies py-6. The two were stacking to 64px of
-    // empty band under the header before anything appeared.
+    // Narrower layout for readable landing-page content.
     <div className="mx-auto max-w-4xl space-y-12 py-2 sm:py-6">
-      {/* ---- hero, and the live numbers directly under it ----
-
-          These are one block on purpose, with a smaller gap between them than between
-          the sections below. The pitch claims something; the numbers are the claim
-          being true right now, a few centimetres away. Separated by a full section
-          gap they were a screen apart, so the first thing a visitor saw was a
-          paragraph and two buttons — and the most convincing thing on the page was
-          below the fold. */}
+      {/* Hero content and live system stats. */}
       <section className="space-y-8">
         <div className="max-w-2xl">
-          {/* An eyebrow, doing one job: saying that the numbers further down are not
-              decoration. Everything else on a landing page is a claim about the past;
-              this says the thing is running while you read about it. */}
+          {/* Indicates that the stats below come from the running system. */}
           <span className="text-muted-foreground border-border/70 mb-5 inline-flex items-center gap-2 rounded-full border px-3 py-1 text-xs">
             <span className="bg-ok h-1.5 w-1.5 animate-pulse rounded-full" />
             live — this page is reading the running system
           </span>
 
           <h1 className="wordmark text-4xl font-semibold tracking-tight sm:text-5xl">QueueFlow</h1>
-          {/* max-w-2xl rather than 3xl: at text-lg that is about 70 characters a line,
-              which is the range prose is comfortable to read in. 3xl ran to nearly 90
-              and the eye loses its place coming back to the left margin. */}
+
           <p className="text-muted-foreground mt-4 text-base leading-relaxed sm:text-lg">
             A distributed background job queue built directly on Redis primitives — no BullMQ, no
             Bee-Queue. An HTTP API accepts work and returns immediately; separate worker processes
@@ -164,12 +135,7 @@ export default function HomePage() {
         </p>
       </section>
 
-      {/* ---- a closing thought ----
-
-          The links that used to sit here moved to the app-wide footer, which appears
-          below this on every page — repeating them would put two link rows within a
-          few centimetres of each other. What is left is the part only this page wants
-          to say: why the thing exists at all. */}
+      {/* Project philosophy and documented design trade-offs. */}
       <section>
         <p className="text-muted-foreground max-w-2xl text-sm leading-relaxed">
           Built to understand the problem rather than to avoid it — the interesting parts of a queue
@@ -181,8 +147,7 @@ export default function HomePage() {
   )
 }
 
-// Inline rather than from lucide — lucide v1 dropped its brand icons, and this is
-// the one place the app needs one.
+// Inline GitHub icon.
 function GithubMark() {
   return (
     <svg viewBox="0 0 16 16" className="h-4 w-4" fill="currentColor" aria-hidden="true">
@@ -191,12 +156,7 @@ function GithubMark() {
   )
 }
 
-// A short accent rule above each heading, fading out to the right.
-//
-// The sections were separated by whitespace alone, which on a long page makes them
-// blur into one column of text. A 2rem mark costs nothing, gives the eye something to
-// land on while scrolling, and is the only place on this page that uses the primary
-// colour — so it reads as structure rather than decoration.
+// Reusable section heading.
 function SectionHeading({ title, note }: { title: string; note: string }) {
   return (
     <div className="mb-5">

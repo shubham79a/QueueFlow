@@ -1,9 +1,7 @@
 import { apiFetch } from './client.ts'
 import type { Job, JobStatus, JobType } from '../types.ts'
 
-// Every call the UI makes about jobs, in one file. Pages import these by name and
-// never build a URL themselves — so when an endpoint changes, it changes here once.
-
+// Cursor-paginated job response.
 export interface JobPage {
   jobs: Job[]
   // Opaque — base64 of the last row's (created_at, id). Pass it back to get the next
@@ -11,7 +9,7 @@ export interface JobPage {
   // change what is inside, and nothing here should depend on the shape.
   nextCursor: string | null
 }
-
+// List jobs with optional status filter and cursor.
 export function listJobs(
   status: JobStatus | '' = '',
   cursor?: string,
@@ -28,7 +26,7 @@ export function listJobs(
 export function getJob(id: string): Promise<Job> {
   return apiFetch<Job>(`/jobs/${id}`)
 }
-
+// Create a job with optional idempotency protection.
 export interface CreatedJob {
   jobId: string
   status: string

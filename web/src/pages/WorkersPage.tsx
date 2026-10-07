@@ -5,8 +5,7 @@ import { shortId } from '@/format'
 import { Card } from '@/components/ui/card'
 import { Skeleton } from '@/components/ui/skeleton'
 
-// One second, not two: the heartbeat TTL counting down is the whole point of this
-// page, and a 2 s poll would make it skip.
+// Poll every second to reflect heartbeat TTL changes.
 const REFRESH_MS = 1000
 
 export default function WorkersPage() {
@@ -48,9 +47,7 @@ export default function WorkersPage() {
 
       <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
         {workers.data?.map((w) => {
-          // The card this page exists for: the heartbeat has lapsed but the processing
-          // list is not empty. That is a crashed worker, seen in the window between its
-          // key expiring and the reaper's next pass.
+          // Heartbeat expired while the worker still holds jobs.
           const stranded = !w.alive && w.holding > 0
 
           return (

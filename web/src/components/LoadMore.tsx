@@ -1,7 +1,6 @@
 import { Button } from '@/components/ui/button'
 
 // "showing 50 of 321", and the button to see more.
-//
 // A button rather than numbered pages, deliberately: numbered pages promise a stable
 // set, and this list gains rows while you are reading it. There is no page 7 to go
 // back to — only "older than what I have".

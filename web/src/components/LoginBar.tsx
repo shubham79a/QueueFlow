@@ -16,15 +16,6 @@ import {
 } from '@/components/ui/dialog'
 
 // Sign in / sign out.
-//
-// A DIALOG RATHER THAN A ROUTE, still: there is one field, and /login would mean
-// navigating away from whatever you were watching and finding your way back. The
-// dashboard never blocks on this — everything is readable signed out.
-//
-// It used to expand in place, turning the header into a password field, a Go button
-// and a Cancel button squeezed beside the health dots. That worked at desk width and
-// fell apart on a phone, where the header already wraps to two rows. A dialog is the
-// same idea with somewhere to put itself.
 export default function LoginBar() {
   const { authenticated, loginEnabled, ready, signIn, signOut } = useAuth()
   const [open, setOpen] = useState(false)
@@ -94,10 +85,7 @@ export default function LoginBar() {
             })
           }}
         >
-          {/* space-y-2.5 rather than the 1.5 used in dense inline forms. In a dialog
-              the label and its field are the only thing on the line, and 6px between
-              them reads as the label sitting on top of the box rather than belonging
-              to it. */}
+          
           <div className="space-y-2.5">
             <Label htmlFor="operator-password">Operator password</Label>
             <Input

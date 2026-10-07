@@ -1,9 +1,6 @@
-// The shapes the API returns, as the browser sees them.
-//
-// Mirrors JobRecord in ../src/shared/types.ts on purpose rather than importing it —
-// web/ and src/ are separate packages with separate builds, and over JSON every Date
-// is a string anyway. If a field is added to the API, add it here too.
+// API response types used by the frontend.
 
+// Allowed job statuses.
 export const JOB_STATUSES = [
   'queued',
   'running',
@@ -15,9 +12,7 @@ export const JOB_STATUSES = [
 
 export type JobStatus = (typeof JOB_STATUSES)[number]
 
-// Mirrors JOB_TYPES in ../src/shared/types.ts. Adding a job type means adding it in
-// both places — the server rejects an unknown type with 400, so the mismatch shows up
-// immediately rather than silently.
+// Supported job types.
 export const JOB_TYPES = ['sleep', 'always_fail', 'deliver_webhook'] as const
 
 export type JobType = (typeof JOB_TYPES)[number]
@@ -38,8 +33,7 @@ export interface Job {
   leaseId: string | null
 }
 
-// One row of GET /api/workers. Assembled from Redis alone — the heartbeat key and
-// the processing list are a worker's entire public presence.
+// Response shape for GET /api/workers.
 export interface Worker {
   id: string
   alive: boolean
@@ -50,9 +44,7 @@ export interface Worker {
   jobs: string[]
 }
 
-// GET /api/health. Answers 503 when degraded, and the body is still meaningful — the
-// fields below are optional because whichever dependency failed will be missing its
-// numbers and carry an error string instead.
+// Response shape for GET /api/health.
 export interface Health {
   status: 'ok' | 'degraded'
   redis: string // "PONG" when up, otherwise the error message

@@ -6,10 +6,6 @@ import { useAuth } from '@/auth'
 import { Button } from '@/components/ui/button'
 
 // Send a dead job back to the queue.
-//
-// This is what makes the dead-letter queue an inbox rather than a graveyard: someone
-// reads the error, fixes the cause, and replays. The endpoint has existed since
-// retries were added; this is the first thing other than curl to call it.
 export default function ReplayButton({ jobId }: { jobId: string }) {
   const qc = useQueryClient()
   const { canWrite } = useAuth()

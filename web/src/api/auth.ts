@@ -1,3 +1,5 @@
+// Authentication API functions and response types.
+
 import { apiFetch } from './client.ts'
 
 export interface Me {
@@ -14,12 +16,11 @@ export function getMe(): Promise<Me> {
   return apiFetch<Me>('/auth/me')
 }
 
-// A wrong password comes back 401, which apiFetch turns into an ApiError carrying the
-// API's message — so the form can show "wrong password" rather than a status code.
+// Login and establish the session cookie.
 export function login(password: string): Promise<{ ok: true }> {
   return apiFetch('/auth/login', { method: 'POST', body: JSON.stringify({ password }) })
 }
-
+// End the current session.
 export function logout(): Promise<{ ok: true }> {
   return apiFetch('/auth/logout', { method: 'POST' })
 }

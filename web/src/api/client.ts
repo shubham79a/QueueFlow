@@ -1,8 +1,4 @@
-// One place that knows the API lives under /api and speaks JSON.
-//
-// Relative URL on purpose: in dev Vite proxies /api to :4000, in prod Express serves
-// both the UI and the API from one origin. Either way the browser never needs to know
-// where the API actually is.
+// Shared JSON client for the /api endpoints.
 
 export class ApiError extends Error {
   readonly status: number
@@ -16,15 +12,13 @@ export class ApiError extends Error {
 export async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`/api${path}`, {
     ...init,
-    // Send the session cookie. Same-origin is already the default for fetch, but stating
-    // it here means every call carries it without each caller remembering to.
+    // Send the session cookie with same-origin requests.
     credentials: 'same-origin',
     headers: { 'Content-Type': 'application/json', ...init?.headers },
   })
 
   if (!res.ok) {
-    // The API always answers errors as { error: "..." }. Surface that message rather
-    // than a bare status code, so the UI can show what actually went wrong.
+    // Convert API errors into ApiError with status and message.
     const body = (await res.json().catch(() => ({}))) as { error?: string }
     throw new ApiError(res.status, body.error ?? res.statusText)
   }

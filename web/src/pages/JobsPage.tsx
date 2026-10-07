@@ -25,40 +25,24 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@
 const ALL = '__all__'
 
 export default function JobsPage() {
-  /**
-   * The filter lives in the URL, not in useState.
-   *
-   * "Look at the dead ones" is a thing you send someone, so it has to survive being
-   * copied out of the address bar. Keeping it in component state meant
-   * /jobs?status=dead did not exist: the link was unshareable, a reload reset it,
-   * and Back left the page instead of undoing the filter.
-   *
-   * What does NOT go here is the paging cursor. You do not have "a page" — you have
-   * however many you have loaded — and a cursor names an instant that has already
-   * passed on a list that keeps growing. A shared link would reopen last Tuesday.
-   * Numbered pagination would belong in the URL; keyset does not.
-   */
+  // Keep the status filter in the URL so it is shareable and survives reloads.
   const [params, setParams] = useSearchParams()
 
-  // Anyone can type into the address bar, and an unknown status would make the API
-  // answer 400. Treat anything unrecognised as no filter at all.
+  // Ignore unknown URL values instead of sending an invalid status to the API.
   const raw = params.get('status') ?? ''
   const status: JobStatus | '' = (JOB_STATUSES as readonly string[]).includes(raw)
     ? (raw as JobStatus)
     : ''
 
   function changeStatus(next: JobStatus | '') {
-    // Dropping the parameter entirely rather than leaving `?status=` — the URL for
-    // "everything" should just be `/jobs`.
+    // Update the URL while preserving browser Back/Forward behavior.
     if (next) params.set('status', next)
     else params.delete('status')
     // A push, not a replace, so Back undoes the filter instead of leaving the page.
     setParams(params)
   }
 
-  // A dialog rather than its own route, so a new job appears in the table behind it
-  // the moment it is created — that is the whole demo, and a route would navigate
-  // away from the thing worth watching.
+  // Keep job creation in a dialog so the table remains visible.
   const [creating, setCreating] = useState(false)
 
   const jobs = useJobList(status)
@@ -93,9 +77,7 @@ export default function JobsPage() {
             </SelectContent>
           </Select>
 
-          {/* Always shown now. It used to hide itself while the inline form was open,
-              because the form WAS the page's answer to pressing it; a dialog leaves the
-              button where your eye last saw it. */}
+          {/* New job dialog trigger. */}
           <Button size="sm" onClick={() => setCreating(true)}>
             <PlusIcon className="h-4 w-4" />
             New job
@@ -113,9 +95,7 @@ export default function JobsPage() {
         <div className="overflow-x-auto">
           <Table>
             <TableHeader>
-              {/* Columns drop out as the screen narrows rather than the table
-                  scrolling sideways — a phone keeps what identifies a job (id, type,
-                  status) and sheds the timings, which are the reason to open it. */}
+              {/* Hide lower-priority columns on smaller screens. */}
               <TableRow>
                 <TableHead>id</TableHead>
                 <TableHead>type</TableHead>
