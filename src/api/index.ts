@@ -257,6 +257,11 @@ api.get("/health", async (_req, res) => {
   return res.status(health.status === "ok" ? 200 : 503).json(health);
 });
 
+// avoid postgres (neon service) calling
+api.get("/live", (_req, res) => {
+  res.status(200).json({ status: "ok" });
+});
+
 // --------------------------------------------------------------------------
 // Operator login.
 // --------------------------------------------------------------------------
